@@ -1,0 +1,193 @@
+{
+  "observable": "delta_a_m",
+  "snr_threshold": 0.3,
+  "coverage_threshold": 0.5,
+  "boundary": [
+    {
+      "duration_days": 7,
+      "log10_rho_min": -8.5,
+      "log10_rho_max": -8.0,
+      "n_rho_points": 2
+    },
+    {
+      "duration_days": 14,
+      "log10_rho_min": -8.0,
+      "log10_rho_max": -8.0,
+      "n_rho_points": 1
+    },
+    {
+      "duration_days": 30,
+      "log10_rho_min": null,
+      "log10_rho_max": null,
+      "n_rho_points": 0
+    },
+    {
+      "duration_days": 60,
+      "log10_rho_min": null,
+      "log10_rho_max": null,
+      "n_rho_points": 0
+    },
+    {
+      "duration_days": 90,
+      "log10_rho_min": null,
+      "log10_rho_max": null,
+      "n_rho_points": 0
+    },
+    {
+      "duration_days": 180,
+      "log10_rho_min": null,
+      "log10_rho_max": null,
+      "n_rho_points": 0
+    },
+    {
+      "duration_days": 365,
+      "log10_rho_min": null,
+      "log10_rho_max": null,
+      "n_rho_points": 0
+    },
+    {
+      "duration_days": 730,
+      "log10_rho_min": null,
+      "log10_rho_max": null,
+      "n_rho_points": 0
+    }
+  ],
+  "mask": [
+    [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ],
+    [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ],
+    [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ],
+    [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ],
+    [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ],
+    [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ],
+    [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ],
+    [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  ]
+}
