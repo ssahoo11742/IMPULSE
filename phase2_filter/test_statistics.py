@@ -4,6 +4,7 @@ All functions operate on lists of 9-state vectors (and associated covariances)
 produced by the forward/backward/smoother pipeline.
 """
 
+from .linalg_utils import safe_eigh_inverse
 import numpy as np
 from typing import List, Tuple, Optional
 
@@ -93,9 +94,7 @@ def compute_mahalanobis_distance(
         P_sub = P_s[np.ix_(state_mask, state_mask)]
 
         # Regularised inverse
-        eigvals, eigvecs = np.linalg.eigh(P_sub)
-        eigvals = np.maximum(eigvals, 1.0e-12)
-        P_inv = eigvecs @ np.diag(1.0 / eigvals) @ eigvecs.T
+        P_inv = safe_eigh_inverse(P_sub)
 
         d[i] = np.sqrt(max(0.0, dx_sub @ P_inv @ dx_sub))
 

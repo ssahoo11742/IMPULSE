@@ -1,3 +1,10 @@
 *.pkl
 *.npy
 */__pycache__/
+*.pdf
+*.json
+*.png
+*.jpg
+*.csv
+*.IN
+*.OUT

@@ -1,0 +1,63 @@
+'EOF'
+	Folder Name	Description	Phase	Progress	Complete
+06cab83a6921d730580042ef03040a7e6db65d4f	taskNumber=17, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=1000, perigeeKm=1000, inclinationDeg=65, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+097c5014f70336dd861286368eb3fc01584bd01c	taskNumber=7, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=800, perigeeKm=800, inclinationDeg=65, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+0b8795d5a91ca5ecd221f07dd4db26f69f31a795	taskNumber=6, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=800, perigeeKm=800, inclinationDeg=51.6, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+0dd855ba7ee99933ae1cfdcd8df2482a445bf63f	taskNumber=13, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=900, perigeeKm=900, inclinationDeg=82, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+11e31640dc9114faab8ae3f0a607dc2dbb0481dd	taskNumber=11, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=900, perigeeKm=900, inclinationDeg=51.6, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+1fd6a25707018708aa0f7eb92deac35e2d056602	taskNumber=5, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=700, perigeeKm=700, inclinationDeg=98, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+2d0bd0ecb1b8747d7b7779e5aa56102566a934bf	taskNumber=18, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=1000, perigeeKm=1000, inclinationDeg=82, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+45c01662f5a153cca3a522b2b073794517ff8742	taskNumber=10, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=800, perigeeKm=800, inclinationDeg=98, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+5ba373259e0d605f1183ce2f9c7f8c94784883d6	taskNumber=14, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=900, perigeeKm=900, inclinationDeg=90, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+60067cc4fd675f3c148b9b8ade9be3c82c65ae90	taskNumber=1, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=700, perigeeKm=700, inclinationDeg=51.6, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+6c6cb9a0c23f9f569a925000703219bc11afad0a	taskNumber=19, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=1000, perigeeKm=1000, inclinationDeg=90, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+81b9f20dd08876b69127006c4f029de3c8e8dc13	taskNumber=12, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=900, perigeeKm=900, inclinationDeg=65, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+9202818ca871c3d2c0d6272733a4dad8781cfb27	taskNumber=4, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=700, perigeeKm=700, inclinationDeg=90, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+9d1ef5c02252a35a78ab1a7e57f757831253ac5e	taskNumber=2, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=700, perigeeKm=700, inclinationDeg=65, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+9ee32cc0fcdac7c068b1d276a7dfbdefac9f637a	taskNumber=3, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=700, perigeeKm=700, inclinationDeg=82, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+9f08843ffe878a54f9dc6b9508a6e8b057fda896	taskNumber=9, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=800, perigeeKm=800, inclinationDeg=90, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+aa63796fe7782efe8f2346638cc59dbd56083161	taskNumber=20, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=1000, perigeeKm=1000, inclinationDeg=98, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+acdb76c3541d6ecd438dd200cb4b82af6d8c72bc	taskNumber=15, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=900, perigeeKm=900, inclinationDeg=98, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+fcef46091fd445d643a0367d57aad1a160f041d8	taskNumber=16, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=1000, perigeeKm=1000, inclinationDeg=51.6, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%	
+ffc80c18927b1dc83a53ef9f0962a47133a58cc7	taskNumber=8, year=2026, igloofile=IGLOO_10x10x1.SIG, apogeeKm=800, perigeeKm=800, inclinationDeg=82, argumentOfPerigeeDeg=0, isRandomAop=false, raanDeg=0, isRandomRAAN=true	leoToGto
+overall	100%
+100%
+EOF

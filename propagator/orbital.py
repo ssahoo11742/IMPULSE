@@ -12,7 +12,11 @@
 import math
 import numpy as np
 from dataclasses import dataclass
-from constants.constants import MU, RE_EQ, J2, J4, R_EARTH, MU_MOON, MU_SUN, P_SRP, AU
+from constants.constants import (
+    MU, RE_EQ, J2, J4, R_EARTH, MU_MOON, MU_SUN, P_SRP, AU,
+    MEAN_MOTION_A_MIN_M, KEPLER_TOL, KEPLER_MAX_ITER, KEPLER_E_GUESS_THRESHOLD,
+    GAUSS_VOP_INC_EPS, GAUSS_VOP_ECC_EPS, SRP_CR_MEAN, THIRDBODY_MIN_DIST_M,
+)
 
 
 @dataclass
@@ -25,7 +29,7 @@ class MeanElements:
     M: float      # mean anomaly, radians
 
     def mean_motion(self):
-        return math.sqrt(MU / max(self.a, 1e6) ** 3)   # rad/s
+        return math.sqrt(MU / max(self.a, MEAN_MOTION_A_MIN_M) ** 3)   # rad/s
 
     def alt_m(self):
         return self.a - R_EARTH   # mean altitude, circular approximation
@@ -51,6 +55,7 @@ def brouwer_rates(a, ecc, inc):
     ~1000x smaller than J2 (see project README), so this is a low-priority
     fix, but treat these specific coefficients as provisional.
     """
+    # print(a)
     n = math.sqrt(MU / a ** 3)
     p = a * (1.0 - ecc ** 2)
     eta = math.sqrt(1.0 - ecc ** 2)
@@ -88,12 +93,11 @@ def drag_rates(a, ecc, Cd, area, mass, rho_atm):
 def srp_ecc_rate(a, area, mass, r_sun_vec):
     """Orbit-averaged SRP eccentricity-pumping rate [Montenbruck & Gill, eq 3.80]."""
     rs = float(np.linalg.norm(r_sun_vec))
-    if rs < 1e6:
+    if rs < THIRDBODY_MIN_DIST_M:
         return 0.0
 
     n = math.sqrt(MU / a ** 3)
-    cr = 1.3   # mean reflectivity [Moe & Moe 2005]
-    a_srp = P_SRP * cr * area / mass * (AU / rs) ** 2
+    a_srp = P_SRP * SRP_CR_MEAN * area / mass * (AU / rs) ** 2
 
     sun_xy_frac = float(np.linalg.norm(r_sun_vec[:2])) / rs   # simplified orbit-plane projection
     return (3.0 / 2.0) * a_srp / (n * a) * sun_xy_frac
@@ -109,7 +113,7 @@ def third_body_rates(a, ecc, inc, r_moon, r_sun):
 
     for mu_body, r_body in [(MU_MOON, r_moon), (MU_SUN, r_sun)]:
         rb = float(np.linalg.norm(r_body))
-        if rb < 1e6:
+        if rb < THIRDBODY_MIN_DIST_M:
             continue
 
         n_body = math.sqrt(mu_body / rb ** 3)
@@ -124,12 +128,12 @@ def third_body_rates(a, ecc, inc, r_moon, r_sun):
     return total_di, total_de
 
 
-def mean_to_true_anomaly(M, ecc, tol=1e-10, max_iter=50):
+def mean_to_true_anomaly(M, ecc, tol=KEPLER_TOL, max_iter=KEPLER_MAX_ITER):
     """Solve Kepler's equation M = E - e*sin(E) for eccentric anomaly E via
     Newton's method, then convert to true anomaly nu. Needed at the moment of
     a debris impact, since Gauss VOP requires true anomaly, not mean anomaly."""
     M = M % (2 * math.pi)
-    E = M if ecc < 0.8 else math.pi   # better starting guess for high-e orbits
+    E = M if ecc < KEPLER_E_GUESS_THRESHOLD else math.pi
     for _ in range(max_iter):
         dE = (E - ecc * math.sin(E) - M) / (1.0 - ecc * math.cos(E))
         E -= dE
@@ -159,8 +163,8 @@ def gauss_vop(a, ecc, inc, argp, nu, dv_rsw):
     da = 2.0 * a ** 2 / h * (ecc * sn * dv_R + (p / r) * dv_S)
     de = (p * sn * dv_R + ((p + r) * cn + r * ecc) * dv_S) / h
     di = r * math.cos(argp + nu) / h * dv_W
-    dOm = r * math.sin(argp + nu) / (h * math.sin(inc + 1e-10)) * dv_W
-    darg = ((-p * cn * dv_R + (p + r) * sn * dv_S) / (h * (ecc + 1e-20))
-            - r * math.sin(argp + nu) * math.cos(inc) / (h * math.sin(inc + 1e-10)) * dv_W)
+    dOm = r * math.sin(argp + nu) / (h * math.sin(inc + GAUSS_VOP_INC_EPS)) * dv_W
+    darg = ((-p * cn * dv_R + (p + r) * sn * dv_S) / (h * (ecc + GAUSS_VOP_ECC_EPS))
+            - r * math.sin(argp + nu) * math.cos(inc) / (h * math.sin(inc + GAUSS_VOP_INC_EPS)) * dv_W)
 
     return da, de, di, dOm, darg

@@ -15,23 +15,21 @@
 
 import math
 import numpy as np
-from constants.constants import DEBRIS_INC_POP
+from constants.constants import (
+    DEBRIS_INC_POP, LC_MIN_M, NSBM_POWER_LAW_EXP,
+    NSBM_AM_REGIME_BOUNDARY_M, NSBM_AM_SMALL_A, NSBM_AM_SMALL_B,
+    NSBM_AM_LARGE_A, NSBM_AM_LARGE_B,
+    VMF_KAPPA_MIN, VMF_KAPPA_MAX, VMF_KAPPA_BISECT_ITER,
+    ROTATION_SINGULARITY_EPS,
+)
 from .orbital import mean_to_true_anomaly, gauss_vop
-
-# NSBM fragment size distribution [Johnson et al. 2001]
-# Minimum fragment size this debris density ρ is defined relative to.
-# NOT specified in the original design doc - this is a modeling choice: we
-# anchor ρ at 1mm, since the whole point of DRIFTS is inferring the density of
-# fragments BELOW the ~10cm radar tracking floor. Revisit if Phase 1
-# sensitivity analysis suggests results are sensitive to this choice.
-LC_MIN_M = 1.0e-3
 
 
 def sample_fragment_lc(rng, n=1):
     """Sample characteristic length(s) Lc (meters) from the NSBM power law
     via inverse CDF: N(Lc>L) ~ L^-1.71, so F(L) = 1 - (L/Lmin)^-1.71."""
     u = rng.uniform(0.0, 1.0, size=n)
-    return LC_MIN_M * (1.0 - u) ** (-1.0 / 1.71)
+    return LC_MIN_M * (1.0 - u) ** (-1.0 / NSBM_POWER_LAW_EXP)
 
 
 def fragment_area_to_mass(Lc):
@@ -41,10 +39,10 @@ def fragment_area_to_mass(Lc):
     log10(Lc) term itself is meters. Using mm here previously produced
     unphysical A/M values (>1000 m^2/kg for a 10cm fragment; real debris
     tops out around 10-40 m^2/kg even for thin foil)."""
-    if Lc < 1.67e-3:
-        log_am = -0.3 * math.log10(Lc) - 1.4
+    if Lc < NSBM_AM_REGIME_BOUNDARY_M:
+        log_am = NSBM_AM_SMALL_A * math.log10(Lc) + NSBM_AM_SMALL_B
     else:
-        log_am = 0.97 * math.log10(Lc) + 1.149
+        log_am = NSBM_AM_LARGE_A * math.log10(Lc) + NSBM_AM_LARGE_B
     return 10.0 ** log_am
 
 
@@ -91,7 +89,7 @@ def compute_vmf_kappa(sat_inc):
     return kappa, mean_cos, flux_sum   # flux_sum here is dimensionless (v_circ=1); scale by real v_circ later
 
 
-def _invert_langevin(target_cos, lo=1e-6, hi=200.0):
+def _invert_langevin(target_cos, lo=VMF_KAPPA_MIN, hi=VMF_KAPPA_MAX):
     def langevin(k):
         return 1.0 / math.tanh(k) - 1.0 / k
 
@@ -99,7 +97,7 @@ def _invert_langevin(target_cos, lo=1e-6, hi=200.0):
         return lo
     if target_cos >= langevin(hi):
         return hi
-    for _ in range(80):
+    for _ in range(VMF_KAPPA_BISECT_ITER):
         mid = (lo + hi) / 2.0
         if langevin(mid) < target_cos:
             lo = mid
@@ -115,7 +113,7 @@ def sample_vmf_direction(kappa, rng):
     kappa. Wood's (1994) rejection algorithm, specialized to p=3 (so the
     Beta((p-1)/2,(p-1)/2) draw reduces to a plain Uniform(0,1)).
     """
-    if kappa < 1e-6:
+    if kappa < VMF_KAPPA_MIN:
         w = rng.uniform(-1.0, 1.0)
     else:
         b = -kappa + math.sqrt(kappa ** 2 + 1.0)   # (p-1)=2 case
@@ -145,7 +143,7 @@ def _rotate_z_to(vec, target):
     v = np.cross(z, target)
     s = np.linalg.norm(v)
     c = np.dot(z, target)
-    if s < 1e-12:
+    if s < ROTATION_SINGULARITY_EPS:
         return vec * np.sign(c) if c != 0 else vec   # already aligned (or anti-aligned)
     vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
     R = np.eye(3) + vx + vx @ vx * ((1 - c) / (s ** 2))

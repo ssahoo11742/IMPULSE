@@ -8,22 +8,36 @@
 
 import math
 import numpy as np
-from constants.constants import AU, OBLIQUITY
+from constants.constants import (
+    AU, OBLIQUITY, SECONDS_PER_DAY,
+    J2000_JD, SUN_MA_J2000_DEG, SUN_MA_RATE_DEG_PER_DAY,
+    SUN_ML_J2000_DEG, SUN_ML_RATE_DEG_PER_DAY,
+    SUN_EQ_CENTER_COEF1_DEG, SUN_EQ_CENTER_COEF2_DEG,
+    SUN_DIST_MEAN_AU, SUN_DIST_ECC_TERM_AU, SUN_DIST_SMALL_TERM_AU,
+    MOON_ML_J2000_DEG, MOON_ML_RATE_DEG_PER_DAY,
+    MOON_MA_J2000_DEG, MOON_MA_RATE_DEG_PER_DAY,
+    MOON_ARG_LAT_J2000_DEG, MOON_ARG_LAT_RATE_DEG_PER_DAY,
+    MOON_LON_PERTURB_AMP_DEG, MOON_LAT_PERTURB_AMP_DEG,
+    MOON_DIST_MEAN_M, MOON_DIST_VAR_AMP_M,
+)
 
 
 def _days_since_j2000(epoch_jd, elapsed_s):
-    return (epoch_jd - 2451545.0) + elapsed_s / 86400.0
+    return (epoch_jd - J2000_JD) + elapsed_s / SECONDS_PER_DAY
 
 
 def sun_position_eci(epoch_jd, elapsed_s):
     """Low-precision Sun position vector in ECI, meters. [Meeus ch. 25]"""
     d = _days_since_j2000(epoch_jd, elapsed_s)
 
-    g = math.radians((357.529 + 0.98560028 * d) % 360.0)          # mean anomaly
-    L = math.radians((280.459 + 0.98564736 * d) % 360.0)          # mean longitude
-    lam = L + math.radians(1.915) * math.sin(g) + math.radians(0.020) * math.sin(2 * g)
+    g = math.radians((SUN_MA_J2000_DEG + SUN_MA_RATE_DEG_PER_DAY * d) % 360.0)
+    L = math.radians((SUN_ML_J2000_DEG + SUN_ML_RATE_DEG_PER_DAY * d) % 360.0)
+    lam = (L + math.radians(SUN_EQ_CENTER_COEF1_DEG) * math.sin(g)
+           + math.radians(SUN_EQ_CENTER_COEF2_DEG) * math.sin(2 * g))
 
-    r_au = 1.00014 - 0.01671 * math.cos(g) - 0.00014 * math.cos(2 * g)
+    r_au = (SUN_DIST_MEAN_AU
+            - SUN_DIST_ECC_TERM_AU * math.cos(g)
+            - SUN_DIST_SMALL_TERM_AU * math.cos(2 * g))
     r = r_au * AU
 
     x = r * math.cos(lam)
@@ -39,16 +53,18 @@ def moon_position_eci(epoch_jd, elapsed_s):
     third-body secular rates."""
     d = _days_since_j2000(epoch_jd, elapsed_s)
 
-    L = math.radians((218.316 + 13.176396 * d) % 360.0)     # mean longitude
-    M_moon = math.radians((134.963 + 13.064993 * d) % 360.0)  # mean anomaly
-    F = math.radians((93.272 + 13.229350 * d) % 360.0)       # argument of latitude
+    L = math.radians((MOON_ML_J2000_DEG + MOON_ML_RATE_DEG_PER_DAY * d) % 360.0)
+    M_moon = math.radians((MOON_MA_J2000_DEG + MOON_MA_RATE_DEG_PER_DAY * d) % 360.0)
+    F = math.radians((MOON_ARG_LAT_J2000_DEG + MOON_ARG_LAT_RATE_DEG_PER_DAY * d) % 360.0)
 
-    lam = L + math.radians(6.289) * math.sin(M_moon)
-    beta = math.radians(5.128) * math.sin(F)
-    r = 385000.6e3 - 20905.4e3 * math.cos(M_moon)   # meters
+    lam = L + math.radians(MOON_LON_PERTURB_AMP_DEG) * math.sin(M_moon)
+    beta = math.radians(MOON_LAT_PERTURB_AMP_DEG) * math.sin(F)
+    r = MOON_DIST_MEAN_M - MOON_DIST_VAR_AMP_M * math.cos(M_moon)
 
     x = r * math.cos(lam) * math.cos(beta)
-    y = r * (math.sin(lam) * math.cos(beta) * math.cos(OBLIQUITY) - math.sin(beta) * math.sin(OBLIQUITY))
-    z = r * (math.sin(lam) * math.cos(beta) * math.sin(OBLIQUITY) + math.sin(beta) * math.cos(OBLIQUITY))
+    y = r * (math.sin(lam) * math.cos(beta) * math.cos(OBLIQUITY)
+             - math.sin(beta) * math.sin(OBLIQUITY))
+    z = r * (math.sin(lam) * math.cos(beta) * math.sin(OBLIQUITY)
+             + math.sin(beta) * math.cos(OBLIQUITY))
 
     return np.array([x, y, z])

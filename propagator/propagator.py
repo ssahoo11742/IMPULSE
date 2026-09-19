@@ -7,7 +7,7 @@
 # period itself), and the environmental drivers (F10.7, sun/moon position)
 # change slowly compared to 1 day, so higher-order integration buys little.
 # This is a deliberate simplification, flagged for revisiting if Phase 1
-# sensitivity analysis shows integration error matters at the ρ-detection
+# sensitivity analysis shows integration error matters at the rho-detection
 # level we care about.
 
 import math
@@ -17,7 +17,10 @@ from .orbital import MeanElements, brouwer_rates, drag_rates, srp_ecc_rate, thir
 from .atmosphere import density, sample_f107_phases, f107_at_time, sample_storm_events, kp_at_time
 from .ephemeris import sun_position_eci, moon_position_eci
 from .debris_impacts import compute_vmf_kappa, sample_impact_count, apply_impact
-from constants.constants import CD_MEAN, CD_SIGMA, CD_MIN, CD_MAX, CD_TAU_S, CD_DRIFT_FRAC, REENTRY_ALT, MU
+from constants.constants import (
+    CD_MEAN, CD_SIGMA, CD_MIN, CD_MAX, CD_TAU_S, CD_DRIFT_FRAC,
+    REENTRY_ALT, MU, F107_BASELINE,
+)
 
 
 @dataclass
@@ -52,7 +55,7 @@ def _step_rates(el, Cd, area, mass, epoch_jd, t_s, f107, kp):
 
 
 def propagate_clean(el0, epoch_jd, duration_s, dt_s, area, mass,
-                     f107_base=150.0, Cd_base=None, rng=None, record_history=True):
+                     f107_base=F107_BASELINE, Cd_base=None, rng=None, record_history=True):
     """
     Propagate a satellite forward with NO debris forcing - gravity harmonics,
     drag, SRP, and lunisolar third-body effects only. Returns final elements
@@ -110,7 +113,7 @@ def propagate_clean(el0, epoch_jd, duration_s, dt_s, area, mass,
 
 
 def propagate_debris(el0, epoch_jd, duration_s, dt_s, area, mass, rho_debris,
-                      f107_base=150.0, Cd_base=None, rng=None, record_history=True):
+                      f107_base=F107_BASELINE, Cd_base=None, rng=None, record_history=True):
     """
     Propagate a satellite forward with the SAME deterministic physics as
     propagate_clean (gravity harmonics, drag, SRP, lunisolar), PLUS stochastic

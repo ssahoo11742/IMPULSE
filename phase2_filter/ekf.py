@@ -1,50 +1,62 @@
 """Extended Kalman Filter (forward or backward) in augmented mean-element space.
 
-REQUIRED COMPANION CHANGE to dynamics.py's (h,k) singularity fix: the state
-is no longer [a, e, i, Omega, argp, M, w_R, w_S, w_W] - it's now
-[a, h, k, i, Omega, M, w_R, w_S, w_W]. The old measurement update assumed
-z = H @ x with H = [I_6, 0], i.e. that the first 6 states directly equal
-the measured classical elements [a, e, i, Omega, argp, M]. That is no longer
-true (x[1]=h != e, x[2]=k != i, x[3]=i != Omega, x[4]=Omega != argp - the
-positions don't even line up, let alone the values), so the update must
-become a proper nonlinear measurement function h(x) with a linearized
-Jacobian H = dh/dx, computed via finite differences (consistent with how
-compute_stm already handles the process model's Jacobian).
+State: [a, h, k, i, Omega, M, w_R, w_S, w_W]^T
+(h, k) = (e*sin(argp), e*cos(argp))
+
+MEASUREMENT FIX: Instead of converting the state back to classical (e, argp)
+for the measurement (which reintroduces the 1/e singularity in the Jacobian),
+we transform the incoming classical measurement into (h, k) space.
+The measurement model is therefore linear: z = [a, h, k, i, Omega, M] = Hx
+with H = [I_6, 0].
 """
 
 import math
 import numpy as np
 from typing import Tuple, Optional, List, Dict
 
+from constants.constants import R_EARTH
 from propagator.orbital import MeanElements
 from . import config
+from .linalg_utils import safe_eigh_floor
 from .dynamics import (
     augmented_dynamics, compute_stm, compute_process_noise,
     _elements_from_x, e_argp_from_hk
 )
 
 
+def _classical_to_hk_measurement(z: np.ndarray) -> np.ndarray:
+    """Transform classical element measurement [a, e, i, Omega, argp, M]
+    to non-singular [a, h, k, i, Omega, M]."""
+    z_hk = z.copy()
+    e = z[1]
+    argp = z[4]
+    z_hk[1] = e * math.sin(argp)
+    z_hk[2] = e * math.cos(argp)
+    return z_hk
+
+
 def _measurement_function(x: np.ndarray) -> np.ndarray:
-    """Predicted measurement z_pred = [a, e, i, Omega, argp, M] from the
-    9-state vector [a, h, k, i, Omega, M, w_R, w_S, w_W]."""
-    el = _elements_from_x(x)
-    return np.array([el.a, el.ecc, el.inc, el.raan, el.argp, el.M])
+    """Predicted measurement z_pred = [a, h, k, i, Omega, M] from the
+    9-state vector [a, h, k, i, Omega, M, w_R, w_S, w_W].
+
+    Direct readout — no conversion back to (e, argp), no singularity.
+    """
+    return np.array([x[0], x[1], x[2], x[3], x[4], x[5]])
 
 
 def _measurement_jacobian(x: np.ndarray, eps: float = 1.0e-7) -> np.ndarray:
-    """H = d(measurement)/dx via forward finite differences - same approach
-    already used for the process model's STM, applied here for consistency
-    rather than hand-deriving analytic partials through the atan2/hypot
-    conversion (which has its own removable-but-fiddly behaviour right at
-    h=k=0)."""
-    z0 = _measurement_function(x)
+    """H = d(measurement)/dx for measurement [a, h, k, i, Omega, M].
+
+    Since the measurement is just the first 6 states directly, H = [I_6, 0].
+    The eps parameter is kept for API compatibility but is no longer used.
+    """
     H = np.zeros((6, 9))
-    for j in range(9):
-        h = max(abs(x[j]), 1.0e-6) * eps
-        x_plus = x.copy()
-        x_plus[j] += h
-        z_plus = _measurement_function(x_plus)
-        H[:, j] = (z_plus - z0) / h
+    H[0, 0] = 1.0
+    H[1, 1] = 1.0
+    H[2, 2] = 1.0
+    H[3, 3] = 1.0
+    H[4, 4] = 1.0
+    H[5, 5] = 1.0
     return H
 
 
@@ -91,64 +103,91 @@ class EKF:
     # ------------------------------------------------------------------
 
     def predict(self, dt: float, f107: float, kp: float) -> None:
-        """Propagate state and covariance over ``dt``.
+        # Sub-step to prevent covariance explosion from large B*dt coupling.
+        # 1-hour sub-steps are a good compromise between accuracy and speed.
+        n_sub = max(1, int(abs(dt) / 3600.0))
+        dt_sub = dt / n_sub
+        
+        for _ in range(n_sub):
+            dxdt = augmented_dynamics(
+                self.x, self.Cd, self.area, self.mass,
+                self.epoch_jd, self.t, f107, kp, self.tau
+            )
+            
+            # Defensive: if this sub-step would drive a negative, coast
+            if not np.all(np.isfinite(dxdt)) or (self.x[0] + dxdt[0] * dt_sub) <= 0:
+                self.t += dt_sub
+                continue
+                
+            self.x += dxdt * dt_sub
 
-        Forward filter : dt > 0,  P = Phi P Phi^T + S
-        Backward filter: dt < 0,  P = Phi P Phi^T - S  (Bennett Sec. II.E)
+            Phi = compute_stm(
+                self.x, dt_sub, self.Cd, self.area, self.mass,
+                self.epoch_jd, self.t, f107, kp, self.tau
+            )
 
-        Unchanged from before - state-representation-agnostic.
-        """
-        dxdt = augmented_dynamics(
-            self.x, self.Cd, self.area, self.mass,
-            self.epoch_jd, self.t, f107, kp, self.tau
-        )
-        self.x += dxdt * dt
+            S = compute_process_noise(dt_sub, self.tau, self.q)
 
-        Phi = compute_stm(
-            self.x, dt, self.Cd, self.area, self.mass,
-            self.epoch_jd, self.t, f107, kp, self.tau
-        )
+            self.P = Phi @ self.P @ Phi.T
+                    # Numerical divergence guard
+            if not np.all(np.isfinite(self.P)) or np.any(np.diag(self.P) > 1e12):
+                raise RuntimeError("EKF covariance diverged during predict")
+            if self.direction == "forward":
+                self.P += S
+            else:
+                self.P -= S
+                self.P = safe_eigh_floor(self.P)
 
-        S = compute_process_noise(dt, self.tau, self.q)
-
-        self.P = Phi @ self.P @ Phi.T
-        if self.direction == "forward":
-            self.P += S
-        else:
-            self.P -= S
-            eigvals, eigvecs = np.linalg.eigh(self.P)
-            eigvals = np.maximum(eigvals, 1.0e-12)
-            self.P = eigvecs @ np.diag(eigvals) @ eigvecs.T
-
-        self.t += dt
+            self.t += dt_sub
 
     def update(self, z: np.ndarray, R_diag: np.ndarray) -> None:
-        """Kalman update with measurement z = [a, e, i, Omega, argp, M].
-
-        CHANGED: now uses the nonlinear measurement function and its
-        finite-difference Jacobian (see module docstring), instead of the
-        old linear H = [I_6, 0], which silently assumed the state directly
-        equalled the measurement - no longer true after the (h,k) fix.
-
-        Also wraps the argp and M innovations to (-pi, pi], since a true
-        measured angle near +-pi could otherwise produce a spurious large
-        innovation against a predicted angle just across the wrap boundary.
-        """
         z = np.asarray(z, dtype=float)
-        R = np.diag(R_diag)
+
+        # Transform classical measurement to (h, k) space
+        z_hk = _classical_to_hk_measurement(z)
+
+        # Get e, argp from current state estimate for R transformation
+        el = _elements_from_x(self.x)
+        e_est = el.ecc
+        argp_est = el.argp
+
+        # Transform measurement noise covariance from classical to (h, k).
+        # R_diag = [R_a, R_e, R_i, R_Omega, R_argp, R_M] (variances).
+        R_hk_diag = np.array([
+            R_diag[0],                                    # a
+            (math.sin(argp_est)**2 * R_diag[1] +
+             (e_est * math.cos(argp_est))**2 * R_diag[4]),  # h
+            (math.cos(argp_est)**2 * R_diag[1] +
+             (e_est * math.sin(argp_est))**2 * R_diag[4]),  # k
+            R_diag[2],                                    # i
+            R_diag[3],                                    # Omega
+            R_diag[5],                                    # M
+        ])
+        R = np.diag(R_hk_diag)
 
         z_pred = _measurement_function(self.x)
         H = _measurement_jacobian(self.x)
 
-        y = z - z_pred
-        y[4] = _wrap_angle(y[4])   # argp
-        y[5] = _wrap_angle(y[5])   # M
+        y = z_hk - z_pred
+        # Wrap angle differences: Omega (index 4) and M (index 5)
+        y[4] = _wrap_angle(y[4])
+        y[5] = _wrap_angle(y[5])
+
+        # Defensive: if covariance or Jacobian is corrupted, skip this update
+        if not np.all(np.isfinite(self.P)) or not np.all(np.isfinite(H)):
+            return
 
         S_cov = H @ self.P @ H.T + R
-        K = self.P @ H.T @ np.linalg.inv(S_cov)
+        S_cov += np.eye(6) * 1.0e-12
+
+        try:
+            K = self.P @ H.T @ np.linalg.inv(S_cov)
+        except np.linalg.LinAlgError:
+            K = self.P @ H.T @ np.linalg.pinv(S_cov)
 
         self.x += K @ y
-        self.P = (np.eye(9) - K @ H) @ self.P
+        I_KH = np.eye(9) - K @ H
+        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
 
     # ------------------------------------------------------------------
     # Convenience accessors

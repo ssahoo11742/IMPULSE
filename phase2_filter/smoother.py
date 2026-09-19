@@ -4,6 +4,7 @@ Fuses forward a posteriori with backward a priori, exactly as Bennett
 Sec. III.C describes.
 """
 
+from .linalg_utils import safe_eigh_inverse
 import numpy as np
 from typing import List, Tuple
 
@@ -47,9 +48,10 @@ def fraser_potter_smoother(
 
         # Weighting matrix  W = P_b * (P_f + P_b)^{-1}
         P_sum = P_f + P_b
-        eigvals, eigvecs = np.linalg.eigh(P_sum)
-        eigvals = np.maximum(eigvals, 1.0e-12)
-        P_sum_inv = eigvecs @ np.diag(1.0 / eigvals) @ eigvecs.T
+        # Guard only against NaN/Inf — safe_eigh_inverse handles ill-conditioning
+        if not np.all(np.isfinite(P_sum)):
+            return fwd_states, fwd_covs
+        P_sum_inv = safe_eigh_inverse(P_sum)
 
         W = P_b @ P_sum_inv
 

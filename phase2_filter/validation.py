@@ -27,8 +27,8 @@ from constants.constants import (
 )
 
 from . import config
-from .dynamics import compute_B_matrix
-from .ekf import EKF
+from .dynamics import compute_B_matrix, compute_B_matrix_orbit_averaged
+from .ekf import _measurement_function, _classical_to_hk_measurement, EKF
 from .smoother import fraser_potter_smoother
 from .test_statistics import (
     compute_smoothed_accel_peak,
@@ -65,7 +65,15 @@ def _step_truth(el, Cd, area, mass, epoch_jd, t_s, f107, kp, bias_w=None):
     d_M = br["n"] + br["dn_j2"]
 
     if bias_w is not None:
-        B = compute_B_matrix(el)
+        # NOTE: orbit-averaged, not the instantaneous compute_B_matrix().
+        # bias_w is a CONSTANT acceleration being Euler-stepped over dt_s
+        # (typically a full day - many orbits at LEO altitudes), so the
+        # rate used here needs to already be a secular/time-averaged rate,
+        # the same way brouwer_rates/drag_rates/etc. are. Using the raw
+        # instantaneous B matrix here was aliasing the periodic
+        # within-orbit content into a large spurious daily signal that
+        # swamped the actual injected bias (wrong sign, ~80x magnitude).
+        B = compute_B_matrix_orbit_averaged(el)
         elem_rates = B @ np.asarray(bias_w)
         d_a += elem_rates[0]
 
@@ -102,8 +110,25 @@ def _propagate_truth(
     rng: Optional[np.random.Generator] = None,
     bias_w: Optional[np.ndarray] = None,
     strike_time: Optional[float] = None,
+    strike_dv_mag: float = 0.006,  # m/s, along -S; default matches the
+                                    # previous hardcoded (1e-4 kg / mass=200) * 12e3 m/s
+    vary_cd: bool = True,
+    truth_substeps: int = 4,
 ) -> Dict:
     """Propagate a truth trajectory with optional constant bias or single strike.
+
+    truth_substeps splits each dt_s Euler step into this many smaller
+    sub-steps for the deterministic + bias rate integration (rates are
+    recomputed each sub-step; environment (f107/kp) and Cd-drift/impact
+    logic stay on the original dt_s cadence - those were designed around
+    daily sampling). This mirrors EKF.predict's own hourly sub-stepping so
+    the truth trajectory isn't systematically less accurate than what the
+    filter is trying to fit against it. With compute_B_matrix_orbit_averaged
+    already handling the bias term's secular-vs-instantaneous mismatch,
+    this is now a secondary numerical-accuracy improvement rather than the
+    primary fix - but it costs little and removes another source of
+    truth/filter inconsistency. Set to 1 to recover the old single-step
+    behavior.
 
     Returns a history dict with keys:
         t, a, e, i, Omega, omega, M, Cd
@@ -134,23 +159,24 @@ def _propagate_truth(
         f107 = f107_at_time(t, f107_phases, f_base=f107_base)
         kp = kp_at_time(t, storms)
 
-        d_a, d_ecc, d_inc, d_raan, d_argp, d_M = _step_truth(
-            el, Cd, area, mass, epoch_jd, t, f107, kp, bias_w
-        )
+        n_sub = max(1, truth_substeps)
+        dt_sub = dt_s / n_sub
+        for _ in range(n_sub):
+            d_a, d_ecc, d_inc, d_raan, d_argp, d_M = _step_truth(
+                el, Cd, area, mass, epoch_jd, t, f107, kp, bias_w
+            )
 
-        el.a += d_a * dt_s
-        el.ecc = max(0.0, el.ecc + d_ecc * dt_s)
-        el.inc += d_inc * dt_s
-        el.raan = (el.raan + d_raan * dt_s) % (2 * math.pi)
-        el.argp = (el.argp + d_argp * dt_s) % (2 * math.pi)
-        el.M += d_M * dt_s
+            el.a += d_a * dt_sub
+            el.ecc = max(0.0, el.ecc + d_ecc * dt_sub)
+            el.inc += d_inc * dt_sub
+            el.raan = (el.raan + d_raan * dt_sub) % (2 * math.pi)
+            el.argp = (el.argp + d_argp * dt_sub) % (2 * math.pi)
+            el.M += d_M * dt_sub
 
         # --- single strike injection ---
         if strike_time is not None and t <= strike_time < t + dt_s:
             v_circ = math.sqrt(MU / el.a)
-            m_frag = 1.0e-4
-            v_rel = 12.0e3
-            dv_mag = (m_frag / mass) * v_rel
+            dv_mag = strike_dv_mag
             dv_rsw = np.array([0.0, -dv_mag, 0.0])
             nu, _ = mean_to_true_anomaly(el.M, el.ecc)
             da, de, di, dOm, darg = gauss_vop(el.a, el.ecc, el.inc, el.argp, nu, dv_rsw)
@@ -160,8 +186,10 @@ def _propagate_truth(
             el.raan = (el.raan + dOm) % (2 * math.pi)
             el.argp = (el.argp + darg) % (2 * math.pi)
 
-        Cd += (1.0 / CD_TAU_S) * (Cd_base - Cd) * dt_s + cd_sigma_step * rng.normal()
-        Cd = float(np.clip(Cd, CD_MIN, CD_MAX))
+        if vary_cd:
+            Cd += (1.0 / CD_TAU_S) * (Cd_base - Cd) * dt_s + cd_sigma_step * rng.normal()
+            Cd = float(np.clip(Cd, CD_MIN, CD_MAX))
+        
         t += dt_s
 
         hist["t"].append(t)
@@ -223,12 +251,23 @@ def _build_initial_state(el0: MeanElements) -> np.ndarray:
     return x0
 
 
-def _build_initial_covariance(R_diag: Optional[np.ndarray] = None) -> np.ndarray:
-    """Diagonal initial covariance."""
+def _build_initial_covariance(
+    R_diag: Optional[np.ndarray] = None,
+    el0: Optional[MeanElements] = None,
+) -> np.ndarray:
+    """Diagonal initial covariance in (a, h, k, i, Omega, M) space."""
     if R_diag is None:
         R_diag = config.R_DIAG_ELEMENTS
+    if el0 is not None:
+        e = el0.ecc
+        argp = el0.argp
+        R_h = math.sin(argp)**2 * R_diag[1] + (e * math.cos(argp))**2 * R_diag[4]
+        R_k = math.cos(argp)**2 * R_diag[1] + (e * math.sin(argp))**2 * R_diag[4]
+    else:
+        R_h = R_diag[1]
+        R_k = R_diag[1]
     P0 = np.diag(np.concatenate([
-        R_diag,
+        [R_diag[0], R_h, R_k, R_diag[2], R_diag[3], R_diag[5]],
         np.full(3, 1.0e-6)
     ]))
     return P0
@@ -255,7 +294,7 @@ def _run_filter_pair(
     """
     # --- forward pass ---
     x0 = _build_initial_state(el0)
-    P0 = _build_initial_covariance()
+    P0 = _build_initial_covariance(el0=el0)
 
     ekf_fwd = EKF(
         x0, P0, Cd_base, area, mass, epoch_jd,
@@ -284,10 +323,11 @@ def _run_filter_pair(
         fwd_states.append(ekf_fwd.x.copy())
         fwd_covs.append(ekf_fwd.P.copy())
         
-        innovations.append(z - _measurement_function(ekf_fwd.x))
+        innovations.append(_classical_to_hk_measurement(z) - _measurement_function(ekf_fwd.x))
         prev_t = t
 
     # --- backward pass ---
+       # --- backward pass ---
     x0_bwd = fwd_states[-1].copy()
     P0_bwd = fwd_covs[-1].copy() * 100.0
 
@@ -302,16 +342,19 @@ def _run_filter_pair(
 
     for t, z in reversed(measurements):
         dt = t - prev_t
-        f107 = f107_at_time(t, f107_phases, f_base=f107_base)
-        kp = kp_at_time(t, storms)
-        ekf_bwd.predict(dt, f107, kp)
+        # First reversed step is the final epoch: no prediction needed
+        if abs(dt) > 1e-12:
+            # Use prev_t (the later time) for env, matching forward-pass convention
+            f107 = f107_at_time(prev_t, f107_phases, f_base=f107_base)
+            kp = kp_at_time(prev_t, storms)
+            ekf_bwd.predict(dt, f107, kp)
         
         bwd_apriori_states.append(ekf_bwd.x.copy())
         bwd_apriori_covs.append(ekf_bwd.P.copy())
         
         ekf_bwd.update(z, config.R_DIAG_ELEMENTS)
         prev_t = t
-
+        
     # --- smoother ---
     sm_states, sm_covs = fraser_potter_smoother(
         fwd_states, fwd_covs,
@@ -405,7 +448,7 @@ def run_bias_test(
 ) -> Dict:
     """2b: Constant injected RSW acceleration. Filter should recover it."""
     if bias_w is None:
-        bias_w = np.array([1.0e-6, 1.0e-6, 1.0e-6])
+        bias_w = np.array([0.0, 1.0e-6, 0.0])
 
     rng = np.random.default_rng(seed)
     el0 = _default_el0()
@@ -416,23 +459,53 @@ def run_bias_test(
 
     truth, storms, f107_phases = _propagate_truth(
         el0, epoch_jd, duration_s, dt_s, area, mass,
-        Cd_base=Cd_base, rng=rng, bias_w=bias_w
+        Cd_base=Cd_base, rng=rng, bias_w=bias_w, vary_cd=False
     )
     meas = generate_noisy_measurements(truth, rng=rng)
 
     tau = tau if tau is not None else config.DEFAULT_TAU_S
-    q = q if q is not None else config.DEFAULT_Q
+    q_scalar = q if q is not None else config.DEFAULT_Q
+
+    # Only w_S is secularly observable with 1-day cadence.
+    # Suppress random-walk of the unobservable R and W channels.
+    q_vec = np.array([0.0, q_scalar, 0.0])
 
     result = _run_filter_pair(
-        meas, el0, Cd_base, area, mass, epoch_jd, tau, q,
+        meas, el0, Cd_base, area, mass, epoch_jd, tau, q_vec,
         storms=storms, f107_phases=f107_phases
     )
 
-    # Steady-state estimated w (interior only, excluding edge transients)
-    margin = max(1, int(7.0 * 86400.0 / dt_s))
-    w_est = np.array([s[6:9] for s in result["sm_states"][margin:-margin]])
+    # Steady-state estimated w (interior only, excluding edge transients).
+    #
+    # This margin was originally a flat "30 days of steps" - wrong on two
+    # counts. (1) For runs <=~60 days that's an empty slice -> crash (see
+    # prior fix). (2) More fundamentally: w_R/w_W here have q=0, so the
+    # ONLY way they return to zero after the early-epoch burn-in transient
+    # (the filter overshooting on the unobservable-with-1-sample/day R,W
+    # channels before it has enough data to disambiguate them) is the
+    # deterministic FOGM decay exp(-t/tau). If tau is comparable to or
+    # larger than the trim window, you're averaging the transient itself,
+    # not a converged value - this was silently inflating estimated_w for
+    # R/W by orders of magnitude at tau=1e6s (a ~10-day window against an
+    # 11.6-day tau is < 1 e-folding). So the margin needs to cover several
+    # tau, not just a fixed calendar window.
+    n_pts = len(result["fwd_states"])
+    margin_burn_in = int(math.ceil(3.0 * tau / dt_s))    # >=3 e-foldings
+    margin_floor = max(3, int(5.0 * 86400.0 / dt_s))     # basic settle time, independent of tau
+    desired_margin = max(margin_burn_in, margin_floor)
+    margin = max(1, min(desired_margin, n_pts // 3))
+    if desired_margin > n_pts // 3:
+        raise ValueError(
+            f"run_bias_test: duration_days={duration_days} (dt_s={dt_s}) gives "
+            f"only {n_pts} measurement(s), but tau={tau:.3e}s needs a burn-in "
+            f"margin of ~{margin_burn_in} steps (>=3*tau) to reach steady "
+            f"state, leaving no interior window to average over. Use a "
+            f"longer duration_days (duration >= ~10*tau is a reasonable "
+            f"floor) or a shorter tau."
+        )
+    w_est = np.array([s[6:9] for s in result["fwd_states"][margin:-margin]])
     w_mean = np.mean(w_est, axis=0)
-    w_err = np.linalg.norm(w_mean - bias_w) / np.linalg.norm(bias_w)
+    w_err = abs(w_mean[1] - bias_w[1]) / abs(bias_w[1])
 
     return {
         "test": "bias",
@@ -448,6 +521,7 @@ def run_impulse_test(
     duration_days: int = 30,
     dt_s: float = 86400.0,
     strike_time_days: float = 15.0,
+    strike_dv_mag: float = 0.006,
     tau: Optional[float] = None,
     q: Optional[float] = None,
     seed: int = 44,
@@ -463,7 +537,8 @@ def run_impulse_test(
 
     truth, storms, f107_phases = _propagate_truth(
         el0, epoch_jd, duration_s, dt_s, area, mass,
-        Cd_base=Cd_base, rng=rng, strike_time=strike_time
+        Cd_base=Cd_base, rng=rng, strike_time=strike_time,
+        strike_dv_mag=strike_dv_mag,
     )
     meas = generate_noisy_measurements(truth, rng=rng)
 

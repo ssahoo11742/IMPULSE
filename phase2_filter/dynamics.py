@@ -48,7 +48,7 @@ from propagator.orbital import (
 )
 from propagator.atmosphere import density
 from propagator.ephemeris import sun_position_eci, moon_position_eci
-from constants.constants import MU
+from constants.constants import MU, R_EARTH
 
 from . import config
 
@@ -57,7 +57,7 @@ from . import config
 # module docstring. NOT the same as the old "1e-20" which did nothing;
 # this is a physically meaningful floor chosen to keep the term bounded
 # without silently zeroing it out.
-E_FLOOR_FOR_DM = 1.0e-3
+E_FLOOR_FOR_DM = 1.0e-8
 
 
 # -----------------------------------------------------------------------
@@ -80,10 +80,8 @@ def e_argp_from_hk(h: float, k: float) -> Tuple[float, float]:
 
 
 def _elements_from_x(x: np.ndarray) -> MeanElements:
-    """Unpack the 9-state vector's first 6 entries into MeanElements.
-    Converts the non-singular (h,k) pair back to (e, argp) internally."""
+    """Unpack the 9-state vector's first 6 entries into MeanElements."""
     e, argp = e_argp_from_hk(float(x[1]), float(x[2]))
-    # Guard: the propagator physics cannot handle e >= 1
     e = min(e, 0.999999)
     return MeanElements(
         a=float(x[0]),
@@ -171,12 +169,74 @@ def compute_B_matrix(el: MeanElements) -> np.ndarray:
     # --- dM/dt: corrected Gauss VOP form (still uses e_floor as safety cap) ---
 # --- dM/dt: corrected Gauss VOP form ---
     e_floor = max(e, E_FLOOR_FOR_DM)
-    factor = b_semi / (a * h_ang * e_floor)   # <-- /a added here
+    factor = b_semi / (h_ang * e_floor * a)   # <-- /a added here
     B[5, 0] = factor * ((p / r) * cn - 2.0 * e)
     B[5, 1] = -factor * ((p + r) / r) * sn
     # no w_W contribution to dM/dt in this form (unchanged from original)
 
     return B
+
+
+def _nu_to_M(nu: float, e: float) -> float:
+    """True anomaly -> mean anomaly (inverse of mean_to_true_anomaly)."""
+    E = 2.0 * math.atan2(
+        math.sqrt(max(0.0, 1.0 - e)) * math.sin(nu / 2.0),
+        math.sqrt(max(0.0, 1.0 + e)) * math.cos(nu / 2.0),
+    )
+    M = E - e * math.sin(E)
+    return M % (2.0 * math.pi)
+
+
+def compute_B_matrix_orbit_averaged(el: MeanElements, n_samples: int = 360) -> np.ndarray:
+    """Time-averaged (secular) Gauss-VOP B matrix for a CONSTANT-direction,
+    constant-magnitude RSW acceleration, averaged over one full revolution.
+
+    WHY THIS EXISTS: compute_B_matrix() above is the INSTANTANEOUS/osculating
+    mapping, evaluated at a single true anomaly. That's the right tool for an
+    impulsive delta-v (a single debris strike), but it is wrong to Euler-step
+    over an interval that spans many orbits (e.g. dt_s=86400s vs. an ~100 min
+    period at 800 km): the instantaneous terms are periodic in nu and mostly
+    cancel over a full revolution, so sampling them once a day aliases that
+    periodic content into a large spurious "secular" signal that can swamp
+    (and misrepresent the sign of) the actual constant bias.
+
+    HOW: rather than re-deriving closed-form averaged Gauss-VOP equations by
+    hand (this project has already been burned twice by hand-algebra mistakes
+    on exactly this class of term - see brouwer_rates docstring and the dM/dt
+    scope note above), this numerically TIME-averages the already-verified
+    instantaneous compute_B_matrix() over one full revolution, weighting each
+    sampled true anomaly by dt/dnu = r^2 / h (Kepler's second law). That
+    weighting is what makes this a genuine time average rather than a
+    (wrong) uniform average over nu.
+
+    Every other deterministic term in this codebase (Brouwer, drag, SRP,
+    third-body) is already an orbit-averaged secular rate by design (see the
+    orbital.py module docstring) - this brings the RSW/bias coupling used for
+    continuous unmodeled-acceleration truth injection in line with that same
+    architecture, instead of being the one instantaneous term mixed in.
+
+    NOTE: only appropriate for a CONTINUOUSLY applied acceleration (the bias
+    test). Do not use this for the single-strike impulse test - that one
+    correctly uses the instantaneous gauss_vop() delta-v formula directly.
+    """
+    e, i, argp = el.ecc, el.inc, el.argp
+    p = el.a * (1.0 - e * e)
+    h_ang = math.sqrt(MU * p)
+
+    B_sum = np.zeros((6, 3))
+    w_sum = 0.0
+    for k in range(n_samples):
+        nu = 2.0 * math.pi * k / n_samples
+        r = p / (1.0 + e * math.cos(nu))
+        weight = r * r / h_ang  # dt/dnu via conservation of angular momentum
+        el_nu = MeanElements(
+            a=el.a, ecc=e, inc=i, raan=el.raan, argp=argp,
+            M=_nu_to_M(nu, e),
+        )
+        B_sum += compute_B_matrix(el_nu) * weight
+        w_sum += weight
+
+    return B_sum / w_sum
 
 
 def augmented_dynamics(
@@ -190,14 +250,11 @@ def augmented_dynamics(
     kp: float,
     tau: float,
 ) -> np.ndarray:
-    """9-state derivative  dx/dt  for the augmented EKF state.
-
-    x = [a, h, k, i, Omega, M, w_R, w_S, w_W]
-
-    tau : float
-        FOGM time constant.  Use +tau for forward filter, -tau for backward.
-    """
     el = _elements_from_x(x)
+    # ---- defensive: coast if a has gone non-finite or negative ----
+    if el.a <= 0.0 or not np.isfinite(el.a):
+        return np.zeros(9)
+    # --------------------------------------------------------------
     w = x[6:9]
     e, argp = el.ecc, el.argp
     h_now, k_now = hk_from_e_argp(e, argp)
@@ -206,6 +263,7 @@ def augmented_dynamics(
     alt = el.alt_m()
     rho = density(alt, f107, kp)
     br = brouwer_rates(el.a, el.ecc, el.inc)
+    
     da_drag, de_drag = drag_rates(el.a, el.ecc, Cd, area, mass, rho)
 
     r_sun = sun_position_eci(epoch_jd, t_s)
@@ -257,13 +315,13 @@ def compute_stm(
     kp: float,
     tau: float,
 ) -> np.ndarray:
-    """State transition matrix Phi = I + A*dt via forward finite differences.
-
-    Unchanged from before - this function is state-representation-agnostic
-    (it differentiates augmented_dynamics generically), so it needed no
-    changes for the (h,k) substitution.
-    """
+    """State transition matrix Phi = I + A*dt via forward finite differences."""
     f0 = augmented_dynamics(x, Cd, area, mass, epoch_jd, t_s, f107, kp, tau)
+    
+    # Defensive: if the nominal dynamics are invalid, coast (identity STM)
+    if not np.all(np.isfinite(f0)):
+        return np.eye(9)
+    
     A = np.zeros((9, 9))
 
     for j in range(9):
@@ -273,10 +331,16 @@ def compute_stm(
         f_plus = augmented_dynamics(
             x_plus, Cd, area, mass, epoch_jd, t_s, f107, kp, tau
         )
-        A[:, j] = (f_plus - f0) / h
+        if not np.all(np.isfinite(f_plus)):
+            continue
+        diff = f_plus - f0
+        if not np.all(np.isfinite(diff)):
+            continue
+        A[:, j] = diff / h
 
     Phi = np.eye(9) + A * dt
     return Phi
+
 
 
 def compute_process_noise(
@@ -284,18 +348,20 @@ def compute_process_noise(
     tau: float,
     q: float,
 ) -> np.ndarray:
-    """Discrete process-noise covariance S for one step. Unchanged - this
-    function only touches the acceleration block (states 6:9), which the
-    (h,k) substitution doesn't affect.
+    """Discrete process-noise covariance S for one step.
 
-    Bennett forward :  P = Phi P Phi^T + S
-    Bennett backward:  P = Phi P Phi^T - S   (S computed with |tau|)
+    q can be a scalar (applied to all 3 channels) or a 3-vector
+    [q_R, q_S, q_W] for per-channel tuning.
     """
     S = np.zeros((9, 9))
     tau_abs = abs(tau)
-    if tau_abs > 1e-12:
-        s_w = q * tau_abs / 2.0 * (1.0 - math.exp(-2.0 * abs(dt) / tau_abs))
-    else:
-        s_w = q * abs(dt)
-    S[6:9, 6:9] = np.eye(3) * s_w
+    q_vec = np.atleast_1d(q)
+    if q_vec.size == 1:
+        q_vec = np.full(3, float(q_vec[0]))
+    for i in range(3):
+        if tau_abs > 1e-12:
+            s_w = float(q_vec[i]) * tau_abs / 2.0 * (1.0 - math.exp(-2.0 * abs(dt) / tau_abs))
+        else:
+            s_w = float(q_vec[i]) * abs(dt)
+        S[6 + i, 6 + i] = s_w
     return S

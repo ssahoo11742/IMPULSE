@@ -1,0 +1,25 @@
+ <?xml version="1.0" standalone="yes"?>
+<DocumentElement>
+  <ProjectValues>
+  <Version>ORDEM 3.2.0</Version>
+  <SpacecraftObservationYear>2026</SpacecraftObservationYear>
+  <SpacecraftOrbitTypeAxis>false</SpacecraftOrbitTypeAxis>
+  <SpacecraftPerigee>900.00</SpacecraftPerigee>
+  <SpacecraftApogee>900.00</SpacecraftApogee>
+  <SpacecraftAxis>0</SpacecraftAxis>
+  <SpacecraftEccentricity>0</SpacecraftEccentricity>
+  <SpacecraftInclination>90.00</SpacecraftInclination>
+  <SpacecraftRandomArg>false</SpacecraftRandomArg>
+  <SpacecraftArgOfPerigee>.00</SpacecraftArgOfPerigee>
+  <SpacecraftRandomRaan>true</SpacecraftRandomRaan>
+  <SpacecraftRaan>0</SpacecraftRaan>
+  <RadarObservationYear>2026</RadarObservationYear>
+  <RadarLatitude>000.00</RadarLatitude>
+  <RadarAzimuth>000.00</RadarAzimuth>
+  <RadarElevation>000.00</RadarElevation>
+  <TleLine1 />
+  <TleLine2 />
+  <SpacecraftIglooFile>IGLOO_10x10x1.SIG</SpacecraftIglooFile>
+  <TelescopeIglooFile></TelescopeIglooFile>
+   </ProjectValues>
+ </DocumentElement>
