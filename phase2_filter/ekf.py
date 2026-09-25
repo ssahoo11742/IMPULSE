@@ -3,11 +3,8 @@
 State: [a, h, k, i, Omega, M, w_R, w_S, w_W]^T
 (h, k) = (e*sin(argp), e*cos(argp))
 
-MEASUREMENT FIX: Instead of converting the state back to classical (e, argp)
-for the measurement (which reintroduces the 1/e singularity in the Jacobian),
-we transform the incoming classical measurement into (h, k) space.
-The measurement model is therefore linear: z = [a, h, k, i, Omega, M] = Hx
-with H = [I_6, 0].
+Measurement is taken in (h, k) space so the Jacobian stays linear and
+singularity-free: z = [a, h, k, i, Omega, M] = Hx with H = [I_6, 0].
 """
 
 import math
@@ -25,8 +22,7 @@ from .dynamics import (
 
 
 def _classical_to_hk_measurement(z: np.ndarray) -> np.ndarray:
-    """Transform classical element measurement [a, e, i, Omega, argp, M]
-    to non-singular [a, h, k, i, Omega, M]."""
+    """Classical [a, e, i, Omega, argp, M] -> [a, h, k, i, Omega, M]."""
     z_hk = z.copy()
     e = z[1]
     argp = z[4]
@@ -36,20 +32,12 @@ def _classical_to_hk_measurement(z: np.ndarray) -> np.ndarray:
 
 
 def _measurement_function(x: np.ndarray) -> np.ndarray:
-    """Predicted measurement z_pred = [a, h, k, i, Omega, M] from the
-    9-state vector [a, h, k, i, Omega, M, w_R, w_S, w_W].
-
-    Direct readout — no conversion back to (e, argp), no singularity.
-    """
+    """Predicted measurement [a, h, k, i, Omega, M] from the 9-state."""
     return np.array([x[0], x[1], x[2], x[3], x[4], x[5]])
 
 
 def _measurement_jacobian(x: np.ndarray, eps: float = 1.0e-7) -> np.ndarray:
-    """H = d(measurement)/dx for measurement [a, h, k, i, Omega, M].
-
-    Since the measurement is just the first 6 states directly, H = [I_6, 0].
-    The eps parameter is kept for API compatibility but is no longer used.
-    """
+    """H = [I_6, 0]. eps kept for API compatibility, unused."""
     H = np.zeros((6, 9))
     H[0, 0] = 1.0
     H[1, 1] = 1.0
@@ -61,16 +49,12 @@ def _measurement_jacobian(x: np.ndarray, eps: float = 1.0e-7) -> np.ndarray:
 
 
 def _wrap_angle(a: float) -> float:
-    """Wrap an angle difference to (-pi, pi]."""
+    """Wrap angle difference to (-pi, pi]."""
     return (a + math.pi) % (2 * math.pi) - math.pi
 
 
 class EKF:
-    """9-state EKF with FOGM dynamic model compensation.
-
-    State: [a, h, k, i, Omega, M, w_R, w_S, w_W]^T
-    (h, k) = (e*sin(argp), e*cos(argp)) - see dynamics.py for why.
-    """
+    """9-state EKF with FOGM dynamic model compensation."""
 
     def __init__(
         self,
@@ -98,27 +82,21 @@ class EKF:
 
         self.history: List[Dict] = []
 
-    # ------------------------------------------------------------------
-    # Core filter steps
-    # ------------------------------------------------------------------
-
     def predict(self, dt: float, f107: float, kp: float) -> None:
-        # Sub-step to prevent covariance explosion from large B*dt coupling.
-        # 1-hour sub-steps are a good compromise between accuracy and speed.
+        # Sub-step to keep B*dt coupling from exploding the covariance.
         n_sub = max(1, int(abs(dt) / 3600.0))
         dt_sub = dt / n_sub
-        
+
         for _ in range(n_sub):
             dxdt = augmented_dynamics(
                 self.x, self.Cd, self.area, self.mass,
                 self.epoch_jd, self.t, f107, kp, self.tau
             )
-            
-            # Defensive: if this sub-step would drive a negative, coast
+
             if not np.all(np.isfinite(dxdt)) or (self.x[0] + dxdt[0] * dt_sub) <= 0:
                 self.t += dt_sub
                 continue
-                
+
             self.x += dxdt * dt_sub
 
             Phi = compute_stm(
@@ -129,7 +107,6 @@ class EKF:
             S = compute_process_noise(dt_sub, self.tau, self.q)
 
             self.P = Phi @ self.P @ Phi.T
-                    # Numerical divergence guard
             if not np.all(np.isfinite(self.P)) or np.any(np.diag(self.P) > 1e12):
                 raise RuntimeError("EKF covariance diverged during predict")
             if self.direction == "forward":
@@ -143,25 +120,23 @@ class EKF:
     def update(self, z: np.ndarray, R_diag: np.ndarray) -> None:
         z = np.asarray(z, dtype=float)
 
-        # Transform classical measurement to (h, k) space
         z_hk = _classical_to_hk_measurement(z)
 
-        # Get e, argp from current state estimate for R transformation
         el = _elements_from_x(self.x)
         e_est = el.ecc
         argp_est = el.argp
 
-        # Transform measurement noise covariance from classical to (h, k).
-        # R_diag = [R_a, R_e, R_i, R_Omega, R_argp, R_M] (variances).
+        # R_diag is classical [R_a, R_e, R_i, R_Omega, R_argp, R_M];
+        # transform the e/argp block into h/k.
         R_hk_diag = np.array([
-            R_diag[0],                                    # a
+            R_diag[0],
             (math.sin(argp_est)**2 * R_diag[1] +
-             (e_est * math.cos(argp_est))**2 * R_diag[4]),  # h
+             (e_est * math.cos(argp_est))**2 * R_diag[4]),
             (math.cos(argp_est)**2 * R_diag[1] +
-             (e_est * math.sin(argp_est))**2 * R_diag[4]),  # k
-            R_diag[2],                                    # i
-            R_diag[3],                                    # Omega
-            R_diag[5],                                    # M
+             (e_est * math.sin(argp_est))**2 * R_diag[4]),
+            R_diag[2],
+            R_diag[3],
+            R_diag[5],
         ])
         R = np.diag(R_hk_diag)
 
@@ -169,11 +144,9 @@ class EKF:
         H = _measurement_jacobian(self.x)
 
         y = z_hk - z_pred
-        # Wrap angle differences: Omega (index 4) and M (index 5)
-        y[4] = _wrap_angle(y[4])
-        y[5] = _wrap_angle(y[5])
+        y[4] = _wrap_angle(y[4])  # Omega
+        y[5] = _wrap_angle(y[5])  # M
 
-        # Defensive: if covariance or Jacobian is corrupted, skip this update
         if not np.all(np.isfinite(self.P)) or not np.all(np.isfinite(H)):
             return
 
@@ -189,24 +162,16 @@ class EKF:
         I_KH = np.eye(9) - K @ H
         self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
 
-    # ------------------------------------------------------------------
-    # Convenience accessors
-    # ------------------------------------------------------------------
-
     def get_elements(self) -> MeanElements:
-        """Return current mean elements (converted from the first 6 states)."""
         return _elements_from_x(self.x)
 
     def get_accel(self) -> np.ndarray:
-        """Return current RSW unmodeled acceleration [w_R, w_S, w_W]."""
         return self.x[6:9].copy()
 
     def get_cov(self) -> np.ndarray:
-        """Return current 9x9 covariance."""
         return self.P.copy()
 
     def record(self, label: str = "") -> None:
-        """Append current state/covariance/time to history."""
         self.history.append({
             "t": self.t,
             "x": self.x.copy(),

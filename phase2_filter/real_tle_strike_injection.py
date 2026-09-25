@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Real-TLE strike injection: calibrate efficiency epsilon(Delta v) on real data.
+"""Real-TLE strike injection: calibrate ε(Δv) on actual TLE histories.
 
-Injects synthetic strikes into actual TLE histories by perturbing elements
-via Gauss-VOP mapping at a random epoch, then runs the degraded filter.
-This gives epsilon_real(Delta v) which accounts for real TLE cadence,
-noise distribution, and data gaps.
+Perturbs real measurements via Gauss-VOP at a random epoch, then runs the
+degraded filter. Accounts for real cadence, noise, and data gaps.
 """
 import argparse
 import json
@@ -31,7 +29,6 @@ MAX_TLES_PER_FILE = 500
 
 
 def load_tles_for_object(fpath: str) -> List[Dict]:
-    """Load TLEs from a single .tle file, capped at MAX_TLES_PER_FILE."""
     tles = []
     try:
         raw = load_tles_from_file(fpath)
@@ -81,11 +78,10 @@ def _build_initial_covariance(el: MeanElements) -> np.ndarray:
     e, argp = el.ecc, el.argp
     R_h = math.sin(argp)**2 * R_DIAG_ELEMENTS[1] + (e * math.cos(argp))**2 * R_DIAG_ELEMENTS[4]
     R_k = math.cos(argp)**2 * R_DIAG_ELEMENTS[1] + (e * math.sin(argp))**2 * R_DIAG_ELEMENTS[4]
-    P0 = np.diag([
+    return np.diag([
         R_DIAG_ELEMENTS[0], R_h, R_k, R_DIAG_ELEMENTS[2], R_DIAG_ELEMENTS[3], R_DIAG_ELEMENTS[5],
         1.0e-6, 1.0e-6, 1.0e-6
     ])
-    return P0
 
 
 def inject_strike_into_measurements(
@@ -93,7 +89,7 @@ def inject_strike_into_measurements(
     strike_time: float,
     dv_mag: float,
 ) -> List:
-    """Perturb measurements at/after strike_time via Gauss-VOP mapping."""
+    """Perturb measurements at/after strike_time via Gauss-VOP."""
     idx = 0
     for i, (t, z) in enumerate(measurements):
         if t > strike_time:
@@ -108,9 +104,7 @@ def inject_strike_into_measurements(
         t0, z0 = measurements[idx - 1]
         t1, z1 = measurements[idx]
         frac = (strike_time - t0) / (t1 - t0) if t1 != t0 else 0.0
-        z_strike = z0 + frac * (z1 - z0)
-        t0 = strike_time
-        z0 = z_strike
+        z0 = z0 + frac * (z1 - z0)
 
     a, e, i, raan, argp, M = z0
     nu, _ = mean_to_true_anomaly(M, e)
@@ -229,7 +223,6 @@ def run_strike_sweep_on_object(
                 )
                 window_meas_rel = [(t - w_start, z) for t, z in window_meas]
 
-                # Forward
                 x0 = _build_initial_state(el0)
                 P0 = _build_initial_covariance(el0)
                 ekf_fwd = EKF(x0, P0, cd_filter, area, mass, epoch0, tau=tau, q=q, direction="forward")
@@ -247,7 +240,6 @@ def run_strike_sweep_on_object(
                     results[dv_f] = {"detected": False, "peak_maha": None, "error": "fwd too short"}
                     continue
 
-                # Backward
                 x0_bwd = fwd_states[-1].copy()
                 P0_bwd = fwd_covs[-1].copy() * 100.0
                 ekf_bwd = EKF(x0_bwd, P0_bwd, cd_filter, area, mass, epoch0, tau=tau, q=q, direction="backward")
@@ -262,7 +254,6 @@ def run_strike_sweep_on_object(
                     ekf_bwd.update(z, R_DIAG_ELEMENTS)
                     prev_t = t_rel
 
-                # Smoother
                 sm_states, sm_covs = fraser_potter_smoother(
                     fwd_states, fwd_covs,
                     list(reversed(bwd_apriori_states)),
@@ -278,10 +269,7 @@ def run_strike_sweep_on_object(
 
                 times = np.array([t for t, _ in window_meas_rel])
                 window_mask = (times >= (strike_time - w_start - 86400)) & (times <= (strike_time - w_start + 86400))
-                if window_mask.any():
-                    peak = float(maha[window_mask].max())
-                else:
-                    peak = float(maha.max())
+                peak = float(maha[window_mask].max()) if window_mask.any() else float(maha.max())
 
                 if not np.isfinite(peak) or abs(peak) > SANITY_CEILING:
                     results[dv_f] = {"detected": False, "peak_maha": None, "error": "peak diverged"}
@@ -331,9 +319,8 @@ def main():
 
     dv_grid = np.logspace(np.log10(args.dv_min), np.log10(args.dv_max), args.n_dv)
     print(f"Real-TLE strike injection")
-    print(f"  Threshold: {args.threshold:.3f}")
-    print(f"  DV grid: {args.dv_min:.2e} to {args.dv_max:.2e} ({args.n_dv} points)")
-    print(f"  tau={args.tau:.3e}, q={args.q:.3e}")
+    print(f"  threshold={args.threshold:.3f}  tau={args.tau:.3e}  q={args.q:.3e}")
+    print(f"  Δv {args.dv_min:.2e} → {args.dv_max:.2e} ({args.n_dv} pts)")
     print()
 
     with open(args.durations) as f:
@@ -343,7 +330,6 @@ def main():
         meta_records = json.load(f)
     norad_ids = {str(r.get("NORAD_CAT_ID", "")) for r in meta_records}
 
-    # Build task list: pass file paths, not TLE data
     objects = []
     for idx, fname in enumerate(sorted(os.listdir(args.tle_history_dir))):
         if not fname.endswith(".tle"):
@@ -356,7 +342,8 @@ def main():
         dur = min(dur, args.max_duration_days)
         if dur < args.window_days:
             continue
-        objects.append((nid, fpath, dur, args.tau, args.q, args.window_days, args.threshold, dv_grid, args.seed_offset + idx))
+        objects.append((nid, fpath, dur, args.tau, args.q, args.window_days,
+                        args.threshold, dv_grid, args.seed_offset + idx))
 
     print(f"Processing {len(objects)} objects...")
 
@@ -373,12 +360,11 @@ def main():
                 pct = 100.0 * i / len(objects)
                 elapsed = time.time() - t0
                 eta = (len(objects) - i) * (elapsed / i) if i > 0 else 0
-                print(f"  [{i:>4}/{len(objects)}] {pct:>5.1f}% | ETA: {eta/60:.1f}m")
+                print(f"  [{i:>4}/{len(objects)}] {pct:>5.1f}%  ETA {eta/60:.1f}m")
 
     successful = [r for r in all_results if r["success"]]
     print(f"\nFinished. Successful: {len(successful)}, Failed: {len(all_results) - len(successful)}")
 
-    # Aggregate epsilon(Delta v)
     detections = {float(dv): [] for dv in dv_grid}
     peaks = {float(dv): [] for dv in dv_grid}
 
@@ -389,38 +375,34 @@ def main():
                 detections[dv].append(1 if res["detected"] else 0)
                 peaks[dv].append(res["peak_maha"])
 
-    print(f"\n{'='*60}")
-    print("REAL-TLE EFFICIENCY epsilon(Delta v)")
-    print(f"{'='*60}")
-    print(f"{'DV (m/s)':>12} {'N trials':>10} {'epsilon':>10} {'mean peak':>12} {'std peak':>12}")
-    print(f"{'-'*60}")
+    print(f"\n{'Δv (m/s)':>12} {'N':>8} {'ε':>8} {'mean peak':>12} {'std peak':>12}")
+    print("-" * 55)
 
     efficiency = {}
     for dv in dv_grid:
         dv_f = float(dv)
         n = len(detections[dv_f])
         if n == 0:
-            print(f"{dv_f:12.5f} {0:>10} {'N/A':>10} {'N/A':>12} {'N/A':>12}")
+            print(f"{dv_f:12.5f} {0:>8} {'N/A':>8} {'N/A':>12} {'N/A':>12}")
             efficiency[dv_f] = {"n": 0, "epsilon": None, "mean_peak": None, "std_peak": None}
             continue
         eps = np.mean(detections[dv_f])
         mean_peak = np.mean(peaks[dv_f]) if peaks[dv_f] else None
         std_peak = np.std(peaks[dv_f]) if peaks[dv_f] else None
-        print(f"{dv_f:12.5f} {n:>10} {eps:>10.4f} {mean_peak:>12.3f} {std_peak:>12.3f}")
+        print(f"{dv_f:12.5f} {n:>8} {eps:>8.4f} {mean_peak:>12.3f} {std_peak:>12.3f}")
         efficiency[dv_f] = {
             "n": n, "epsilon": float(eps),
             "mean_peak": float(mean_peak) if mean_peak is not None else None,
             "std_peak": float(std_peak) if std_peak is not None else None,
         }
 
-    # Interpolate DV_50 and DV_90
     dvs = np.array([float(dv) for dv in dv_grid])
     eps_arr = np.array([efficiency[float(dv)]["epsilon"] for dv in dv_grid])
-    valid = ~np.isnan(eps_arr)
+    valid = ~np.isnan(eps_arr.astype(float))
     dv50 = dv90 = None
     if valid.any():
         dvs_v = dvs[valid]
-        eps_v = eps_arr[valid]
+        eps_v = eps_arr[valid].astype(float)
         sort_idx = np.argsort(eps_v)
         dvs_v = dvs_v[sort_idx]
         eps_v = eps_v[sort_idx]
@@ -429,7 +411,8 @@ def main():
         if eps_v.min() <= 0.9 <= eps_v.max():
             dv90 = float(np.interp(0.9, eps_v, dvs_v))
 
-    print(f"\nDV_50 = {dv50:.5f} m/s" if dv50 else "\nDV_50: not bracketed")
+    print()
+    print(f"DV_50 = {dv50:.5f} m/s" if dv50 else "DV_50: not bracketed")
     print(f"DV_90 = {dv90:.5f} m/s" if dv90 else "DV_90: not bracketed")
 
     output_data = {

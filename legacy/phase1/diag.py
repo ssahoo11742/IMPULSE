@@ -23,13 +23,13 @@ import traceback
 import numpy as np
 
 from propagator.orbital import MeanElements
-from phase1.phase1_runner import propagate_clean, propagate_debris
+from DRIFTED.legacy.phase1.phase1_runner import propagate_clean, propagate_debris
 
 DURATION_DAYS = 730
 N_TRIALS = 30  # small - just enough to catch a few failures
 
 try:
-    from phase1.phase1_config import PARAMETER_BOUNDS, sample_sobol, map_to_bounds, get_parameter_dict, PARAMETER_NAMES
+    from DRIFTED.legacy.phase1.phase1_config import PARAMETER_BOUNDS, sample_sobol, map_to_bounds, get_parameter_dict, PARAMETER_NAMES
     USING_REAL_CONFIG = True
     print("Using REAL phase1_config.py bounds - good, this should match your production run.\n")
 except ImportError:

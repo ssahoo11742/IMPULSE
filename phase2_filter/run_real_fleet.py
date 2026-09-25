@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 """Run real fleet through degraded filter with quality cuts.
 
-Quality cuts applied per window:
-  - n_tles >= 15
-  - max_gap_days <= 14
-  - abs(alt_drop_km) <= 10
-  - Skip w=0 if object has >90 days of data (poor initial TLE bias)
-  - EKF divergence guard (skip window if covariance explodes)
+Cuts per window: n_tles >= 15, max_gap <= 14 d, |alt_drop| <= 10 km,
+skip w=0 if object has >90 d of data, skip on EKF divergence.
 
 Usage:
     python -m phase2_filter.run_real_fleet \
@@ -42,7 +38,6 @@ MAX_TLES_PER_FILE = 500
 
 
 def load_tles_for_object(fpath: str) -> List[Dict]:
-    """Load TLEs from a single .tle file, capped at MAX_TLES_PER_FILE."""
     tles = []
     try:
         raw = load_tles_from_file(fpath)
@@ -92,11 +87,10 @@ def _build_initial_covariance(el: MeanElements) -> np.ndarray:
     e, argp = el.ecc, el.argp
     R_h = math.sin(argp)**2 * R_DIAG_ELEMENTS[1] + (e * math.cos(argp))**2 * R_DIAG_ELEMENTS[4]
     R_k = math.cos(argp)**2 * R_DIAG_ELEMENTS[1] + (e * math.sin(argp))**2 * R_DIAG_ELEMENTS[4]
-    P0 = np.diag([
+    return np.diag([
         R_DIAG_ELEMENTS[0], R_h, R_k, R_DIAG_ELEMENTS[2], R_DIAG_ELEMENTS[3], R_DIAG_ELEMENTS[5],
         1.0e-6, 1.0e-6, 1.0e-6
     ])
-    return P0
 
 
 def process_object_real(
@@ -147,7 +141,6 @@ def process_object_real(
             w_end = (w + 1) * window_s
             window_meas = [(t, z) for t, z in measurements if w_start <= t < w_end]
 
-            # --- QUALITY CUTS ---
             if len(window_meas) < 15:
                 continue
 
@@ -158,14 +151,11 @@ def process_object_real(
 
             a_start = float(window_meas[0][1][0])
             a_end = float(window_meas[-1][1][0])
-            alt_drop = (a_start - a_end) / 1000.0
-            if abs(alt_drop) > 10.0:
+            if abs((a_start - a_end) / 1000.0) > 10.0:
                 continue
 
-            # Skip window 0 if object has enough later data (poor initial TLE bias)
             if w == 0 and total_data_days > 90.0:
                 continue
-            # --- END QUALITY CUTS ---
 
             n_valid_windows += 1
 
@@ -180,7 +170,6 @@ def process_object_real(
             window_meas_rel = [(t - w_start, z) for t, z in window_meas]
 
             try:
-                # Forward
                 x0 = _build_initial_state(el0)
                 P0 = _build_initial_covariance(el0)
                 ekf_fwd = EKF(x0, P0, cd_filter, area, mass, epoch0, tau=tau, q=q, direction="forward")
@@ -197,7 +186,6 @@ def process_object_real(
                 if len(fwd_states) < 2:
                     continue
 
-                # Backward
                 x0_bwd = fwd_states[-1].copy()
                 P0_bwd = fwd_covs[-1].copy() * 100.0
                 ekf_bwd = EKF(x0_bwd, P0_bwd, cd_filter, area, mass, epoch0, tau=tau, q=q, direction="backward")
@@ -212,7 +200,6 @@ def process_object_real(
                     ekf_bwd.update(z, R_DIAG_ELEMENTS)
                     prev_t = t_rel
 
-                # Smoother
                 sm_states, sm_covs = fraser_potter_smoother(
                     fwd_states, fwd_covs,
                     list(reversed(bwd_apriori_states)),
@@ -259,7 +246,6 @@ def process_object_real(
 
 
 def process_one_wrapper(args):
-    """Worker wrapper that loads TLEs from file path instead of receiving them pre-loaded."""
     norad_id, fpath, duration_days, tau, q, window_days, threshold = args
     tle_list = load_tles_for_object(fpath)
     return process_object_real(norad_id, tle_list, duration_days, tau, q, window_days, threshold)
@@ -286,7 +272,6 @@ def main():
         meta_records = json.load(f)
     norad_ids = {str(r.get("NORAD_CAT_ID", "")) for r in meta_records}
 
-    # Build task list: pass file paths, not TLE data, to avoid MemoryError on Windows
     objects = []
     for fname in sorted(os.listdir(args.tle_history_dir)):
         if not fname.endswith(".tle"):
@@ -301,7 +286,7 @@ def main():
             continue
         objects.append((nid, fpath, dur, args.tau, args.q, args.window_days, args.threshold))
 
-    print(f"Processing {len(objects)} objects with sufficient duration...")
+    print(f"Processing {len(objects)} objects...")
 
     t0 = time.time()
     results = []
@@ -316,7 +301,7 @@ def main():
                 pct = 100.0 * i / len(objects)
                 elapsed = time.time() - t0
                 eta = (len(objects) - i) * (elapsed / i) if i > 0 else 0
-                print(f"  [{i:>4}/{len(objects)}] {pct:>5.1f}% | ETA: {eta/60:.1f}m")
+                print(f"  [{i:>4}/{len(objects)}] {pct:>5.1f}%  ETA {eta/60:.1f}m")
 
     elapsed_total = time.time() - t0
     successful = [r for r in results if r["success"]]
@@ -343,23 +328,18 @@ def main():
     all_peaks_arr = np.array(all_peaks)
     n_total = len(all_peaks_arr)
 
-    print(f"\n{'='*60}")
-    print("REAL FLEET DETECTION RESULTS")
-    print(f"{'='*60}")
-    print(f"Total windows (raw):     {total_windows}")
-    print(f"Total valid windows:     {total_valid_windows}")
-    print(f"Valid fraction:          {100*total_valid_windows/total_windows:.1f}%" if total_windows > 0 else "N/A")
-    print(f"Total peaks computed:    {n_total}")
+    print(f"\nWindows: {total_windows} raw, {total_valid_windows} valid"
+          f" ({100*total_valid_windows/total_windows:.1f}%)" if total_windows > 0 else "")
+    print(f"Peaks computed: {n_total}")
 
     if n_total > 0:
-        print(f"Mean peak Mahalanobis:   {np.mean(all_peaks_arr):.3f}")
-        print(f"Std peak Mahalanobis:    {np.std(all_peaks_arr):.3f}")
-        print(f"99.97th percentile:      {np.percentile(all_peaks_arr, 99.97):.3f}")
-        print(f"\nThreshold: {args.threshold:.3f}")
-        print(f"Raw detections (>thr):   {total_detected}")
-        print(f"Raw trigger rate:        {100*total_detected/total_valid_windows:.2f}%" if total_valid_windows > 0 else "N/A")
+        print(f"Mean peak: {np.mean(all_peaks_arr):.3f}  std: {np.std(all_peaks_arr):.3f}")
+        print(f"99.97th:   {np.percentile(all_peaks_arr, 99.97):.3f}")
+        print(f"Threshold: {args.threshold:.3f}")
+        print(f"Detections: {total_detected}"
+              f" ({100*total_detected/total_valid_windows:.2f}%)" if total_valid_windows > 0 else "")
     else:
-        print("\nWARNING: no peaks computed")
+        print("WARNING: no peaks computed")
 
     output_data = {
         "config": {

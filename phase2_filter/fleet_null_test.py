@@ -1,36 +1,16 @@
-#!/usr/bin/env python3
-"""
-Process a fleet of TLEs through the EKF + smoother pipeline to validate
-filter behavior on real orbits. This is a VALIDATION TEST only — it uses
-synthetic data (one TLE per object propagated forward with added noise).
+"""Fleet validation: run EKF+smoother on real-orbit TLEs with synthetic null data.
 
-PURPOSE:
-    - Test filter stability on real TLE-derived orbits (varying inclinations,
-      altitudes, eccentricities)
-    - Generate a null distribution from real orbits for comparison to the
-      fixed-orbit null calibration (mean=3.17, std=1.36)
-    - Identify orbit-dependent filter performance
-
-WHAT THIS SCRIPT DOES:
-    1. Takes ONE TLE per object (the most recent)
-    2. Propagates it forward cleanly for its clipped duration (no debris)
-    3. Adds synthetic Gaussian noise (using R_DIAG_ELEMENTS)
-    4. Splits into 90-day windows
-    5. Runs EKF + smoother on each window independently
-    6. Reports peak Mahalanobis distribution across all windows
-
-WHAT THIS SCRIPT DOES NOT DO:
-    - Does NOT detect real debris (uses synthetic data)
-    - Does NOT use full TLE histories (only one TLE per object)
-    - Does NOT replace the null calibration (threshold is already known)
+Takes one TLE per object, propagates it clean (no debris), adds measurement
+noise, windows into 90-day chunks, and reports the peak Mahalanobis
+distribution. Validation only — does not detect real debris.
 
 Usage:
-    python -m phase2_filter.process_fleet \\
-        --tle-file TLE/real_tles.tle \\
-        --meta TLE/real_tles.tle.meta.json \\
-        --durations TLE/real_tles.tle.durations.json \\
-        --tau 3e4 --q 1e-19 --window-days 90 --max-duration-days 7300 \\
-        --output results/fleet_validation.json \\
+    python -m phase2_filter.process_fleet \
+        --tle-file TLE/real_tles.tle \
+        --meta TLE/real_tles.tle.meta.json \
+        --durations TLE/real_tles.tle.durations.json \
+        --tau 3e4 --q 1e-19 --window-days 90 --max-duration-days 7300 \
+        --output results/fleet_validation.json \
         --n-workers 8
 """
 
@@ -38,6 +18,8 @@ import argparse
 import json
 import math
 import multiprocessing as mp
+import os
+import time
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -56,19 +38,17 @@ from constants.constants import (
     CD_MEAN, CD_SIGMA, CD_MIN, CD_MAX, CD_TAU_S, CD_DRIFT_FRAC,
     REENTRY_ALT, F107_BASELINE,
 )
-import time
+
 SANITY_CEILING = 1.0e4
 
-# Reference null calibration values (from calibrate_null_threshold.py)
 REF_NULL_MEAN = 3.174
 REF_NULL_STD = 1.356
 REF_NULL_99PCT = 6.830
 REF_NULL_9997PCT = 8.843
 
+
 def stratified_sample(objects_to_process, n_target=500, n_inc_bins=6, n_sma_bins=6, seed=42):
-    """Pick a subset that spreads across (inclination, altitude) bins instead
-    of taking objects in file order, which can badly under-represent the
-    fleet's dominant populations (e.g. SSO)."""
+    """Sample across (inclination, altitude) bins instead of file order."""
     rng_local = np.random.default_rng(seed)
 
     incs = np.array([o["inclination"] for o in objects_to_process])
@@ -98,9 +78,10 @@ def stratified_sample(objects_to_process, n_target=500, n_inc_bins=6, n_sma_bins
         selected.extend(remaining[:n_target - len(selected)])
 
     selected = selected[:n_target]
-    print(f"Stratified sample: {len(selected)} objects across {n_buckets} "
-          f"(inc x altitude) bins ({n_inc_bins}x{n_sma_bins} grid)")
+    print(f"Stratified sample: {len(selected)} objects across {n_buckets} bins "
+          f"({n_inc_bins}x{n_sma_bins})")
     return [objects_to_process[i] for i in selected]
+
 
 def propagate_truth_from_tle(
     tle: Dict, epoch_jd: float, duration_s: float, dt_s: float,
@@ -108,14 +89,7 @@ def propagate_truth_from_tle(
     Cd_base: Optional[float] = None, rng: Optional[np.random.Generator] = None,
     vary_cd: bool = True, truth_substeps: int = 4,
 ) -> Tuple[Dict, List, Dict, float]:
-    """
-    Propagate a truth trajectory from a TLE with NO debris forcing.
-    
-    Returns:
-        hist: Dictionary of time histories [t, a, e, i, Omega, omega, M, Cd]
-        storms: List of storm events
-        f107_phases: Solar flux phases
-    """
+    """Propagate truth from a TLE with no debris forcing."""
     if rng is None:
         rng = np.random.default_rng()
     if Cd_base is None:
@@ -135,13 +109,13 @@ def propagate_truth_from_tle(
     for _ in range(n_steps):
         if el.alt_m() < REENTRY_ALT:
             break
-            
+
         f107 = f107_at_time(t, f107_phases, f_base=f107_base)
         kp = kp_at_time(t, storms)
-        
+
         n_sub = max(1, truth_substeps)
         dt_sub = dt_s / n_sub
-        
+
         for _ in range(n_sub):
             d_a, d_ecc, d_inc, d_raan, d_argp, d_M = _step_rates(
                 el, Cd, area, mass, epoch_jd, t, f107, kp
@@ -152,11 +126,11 @@ def propagate_truth_from_tle(
             el.raan = (el.raan + d_raan * dt_sub) % (2 * math.pi)
             el.argp = (el.argp + d_argp * dt_sub) % (2 * math.pi)
             el.M = (el.M + d_M * dt_sub) % (2 * math.pi)
-            
+
         if vary_cd:
             Cd += (1.0 / CD_TAU_S) * (Cd_base - Cd) * dt_s + cd_sigma_step * rng.normal()
             Cd = float(np.clip(Cd, CD_MIN, CD_MAX))
-            
+
         t += dt_s
         hist["t"].append(t)
         hist["a"].append(el.a)
@@ -171,21 +145,17 @@ def propagate_truth_from_tle(
 
 
 def generate_noisy_measurements_from_truth(
-    truth_hist: Dict, 
+    truth_hist: Dict,
     R_diag: np.ndarray = R_DIAG_ELEMENTS,
     rng: Optional[np.random.Generator] = None,
 ) -> List[Tuple[float, np.ndarray]]:
-    """
-    Add Gaussian noise to truth elements to simulate TLE measurements.
-    
-    R_diag values are VARIANCES (σ²). The noise standard deviation is sqrt(R_diag).
-    """
+    """Add Gaussian noise to truth elements (R_diag are variances)."""
     if rng is None:
         rng = np.random.default_rng()
-        
+
     n = len(truth_hist["t"])
     meas = []
-    
+
     for i in range(n):
         z = np.array([
             truth_hist["a"][i],
@@ -197,12 +167,11 @@ def generate_noisy_measurements_from_truth(
         ])
         z += rng.normal(scale=np.sqrt(R_diag))
         meas.append((truth_hist["t"][i], z))
-        
+
     return meas
 
 
 def _build_initial_state(el: MeanElements) -> np.ndarray:
-    """Build 9-state initial vector [a, h, k, i, Omega, M, 0, 0, 0]."""
     h, k = hk_from_e_argp(el.ecc, el.argp)
     x0 = np.zeros(9)
     x0[0] = el.a
@@ -215,24 +184,15 @@ def _build_initial_state(el: MeanElements) -> np.ndarray:
 
 
 def _build_initial_covariance(el: MeanElements) -> np.ndarray:
-    """Build diagonal initial covariance in (a, h, k, i, Omega, M) space."""
     R_diag = R_DIAG_ELEMENTS
     e, argp = el.ecc, el.argp
-    
-    # Transform covariance from (e, argp) to (h, k)
+
     R_h = math.sin(argp)**2 * R_diag[1] + (e * math.cos(argp))**2 * R_diag[4]
     R_k = math.cos(argp)**2 * R_diag[1] + (e * math.sin(argp))**2 * R_diag[4]
-    
+
     diag = [
-        R_diag[0],   # a
-        R_h,         # h
-        R_k,         # k
-        R_diag[2],   # i
-        R_diag[3],   # Omega
-        R_diag[5],   # M
-        1.0e-6,      # w_R (small initial uncertainty)
-        1.0e-6,      # w_S
-        1.0e-6,      # w_W
+        R_diag[0], R_h, R_k, R_diag[2], R_diag[3], R_diag[5],
+        1.0e-6, 1.0e-6, 1.0e-6,
     ]
     return np.diag(diag)
 
@@ -251,47 +211,34 @@ def _run_one_window(
     rng: np.random.Generator,
     Cd_base: float,
 ) -> Dict:
-    """
-    Run forward+backward+smoother on ONE 90-day window.
-    
-    Args:
-        window_measurements: List of (t_rel, z) where t_rel is seconds from window start
-        el_window_start: True mean elements at window start
-        base_t_offset: Absolute time at window start (seconds from epoch)
-    
-    Returns:
-        Dict with peak_maha and peak_time_rel_s
-    """
+    """Forward + backward + smoother on one window. Returns peak_maha."""
     x0 = _build_initial_state(el_window_start)
     P0 = _build_initial_covariance(el_window_start)
-    
 
-    # --- Forward pass ---
     ekf_fwd = EKF(x0, P0, Cd_base, area, mass, epoch_jd, tau=tau, q=q, direction="forward")
     fwd_states, fwd_covs = [], []
     prev_t = 0.0
-    
+
     for t_rel, z in window_measurements:
         dt = t_rel - prev_t
         abs_t = base_t_offset + prev_t
         f107 = f107_at_time(abs_t, f107_phases, f_base=F107_BASELINE)
         kp = kp_at_time(abs_t, storms)
-        
+
         ekf_fwd.predict(dt, f107, kp)
         ekf_fwd.update(z, R_DIAG_ELEMENTS)
-        
+
         fwd_states.append(ekf_fwd.x.copy())
         fwd_covs.append(ekf_fwd.P.copy())
         prev_t = t_rel
 
-    # --- Backward pass ---
     x0_bwd = fwd_states[-1].copy()
     P0_bwd = fwd_covs[-1].copy() * 100.0
-    
+
     ekf_bwd = EKF(x0_bwd, P0_bwd, Cd_base, area, mass, epoch_jd, tau=tau, q=q, direction="backward")
     bwd_apriori_states, bwd_apriori_covs = [], []
     prev_t = window_measurements[-1][0]
-    
+
     for t_rel, z in reversed(window_measurements):
         dt = t_rel - prev_t
         if abs(dt) > 1e-12:
@@ -299,27 +246,23 @@ def _run_one_window(
             f107 = f107_at_time(abs_t, f107_phases, f_base=F107_BASELINE)
             kp = kp_at_time(abs_t, storms)
             ekf_bwd.predict(dt, f107, kp)
-            
+
         bwd_apriori_states.append(ekf_bwd.x.copy())
         bwd_apriori_covs.append(ekf_bwd.P.copy())
         ekf_bwd.update(z, R_DIAG_ELEMENTS)
         prev_t = t_rel
 
-    # --- Smoother ---
     sm_states, sm_covs = fraser_potter_smoother(
-        fwd_states, 
-        fwd_covs,
+        fwd_states, fwd_covs,
         list(reversed(bwd_apriori_states)),
         list(reversed(bwd_apriori_covs))
     )
 
-    # --- Mahalanobis distance (restricted to 'a') ---
     mask = np.zeros(9, dtype=bool)
     mask[0] = True
-    
+
     maha = compute_mahalanobis_distance(
-        fwd_states,
-        fwd_covs,
+        fwd_states, fwd_covs,
         list(reversed(bwd_apriori_states)),
         list(reversed(bwd_apriori_covs)),
         sm_covs,
@@ -330,12 +273,8 @@ def _run_one_window(
     peak_idx = int(np.argmax(maha))
     peak_time_rel = window_measurements[peak_idx][0]
 
-    # Sanity check
     if not np.isfinite(peak_maha) or abs(peak_maha) > SANITY_CEILING:
-        raise RuntimeError(
-            f"peak_maha={peak_maha:.3e} is non-finite or unphysically large "
-            f"- filter diverged in this window"
-        )
+        raise RuntimeError(f"peak_maha={peak_maha:.3e} diverged")
 
     return {"peak_maha": peak_maha, "peak_time_rel_s": peak_time_rel}
 
@@ -348,10 +287,7 @@ def run_filter_on_object(
     window_days: float,
     seed: int,
 ) -> Dict:
-    """
-    Process a single object: propagate truth, generate measurements, window,
-    run EKF on each window.
-    """
+    """Propagate truth, generate measurements, window, run EKF per window."""
     try:
         rng = np.random.default_rng(seed)
         epoch_jd = tle_data["epoch_jd"]
@@ -372,16 +308,13 @@ def run_filter_on_object(
         duration_days_used = n_windows * window_days
         duration_s = duration_days_used * 86400.0
 
-        # Propagate truth (no debris)
         truth_hist, storms, f107_phases, Cd_truth_base = propagate_truth_from_tle(
             tle_data, epoch_jd, duration_s, dt_s,
             area=area, mass=mass, rng=rng
         )
-        
-        # Generate noisy measurements
+
         measurements = generate_noisy_measurements_from_truth(truth_hist, rng=rng)
 
-        # Process each window
         window_results = []
         for w in range(n_windows):
             w_start_s = w * window_days * 86400.0
@@ -389,14 +322,13 @@ def run_filter_on_object(
 
             idx_start = next((i for i, (t, _) in enumerate(measurements) if t >= w_start_s), None)
             idx_end = next((i for i, (t, _) in enumerate(measurements) if t >= w_end_s), len(measurements))
-            
+
             if idx_start is None or idx_end - idx_start < 2:
                 continue
 
             window_meas_abs = measurements[idx_start:idx_end]
             window_meas_rel = [(t - w_start_s, z) for t, z in window_meas_abs]
 
-            # True state at window start
             idx_truth = max(0, idx_start - 1) if idx_start > 0 else 0
             el_start = MeanElements(
                 a=truth_hist["a"][idx_truth],
@@ -409,18 +341,8 @@ def run_filter_on_object(
 
             try:
                 result = _run_one_window(
-                    window_meas_rel,
-                    el_start,
-                    epoch_jd,
-                    tau,
-                    q,
-                    area,
-                    mass,
-                    storms,
-                    f107_phases,
-                    w_start_s,
-                    rng,
-                    Cd_truth_base,
+                    window_meas_rel, el_start, epoch_jd, tau, q,
+                    area, mass, storms, f107_phases, w_start_s, rng, Cd_truth_base,
                 )
                 result["window_index"] = w
                 result["window_start_day"] = w * window_days
@@ -454,7 +376,6 @@ def run_filter_on_object(
 
 
 def process_one_wrapper(args):
-    """Multiprocessing wrapper."""
     tle_data, duration_days, tau, q, window_days, seed_offset, idx = args
     return run_filter_on_object(
         tle_data, duration_days, tau, q, window_days, seed_offset + idx
@@ -462,42 +383,28 @@ def process_one_wrapper(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Process a fleet of TLEs (windowed validation test)"
-    )
-    
+    parser = argparse.ArgumentParser(description="Fleet TLE validation (windowed null test)")
+
     parser.add_argument("--stratified-sample", type=int, default=None,
-                        help="Instead of --max-objects, pick this many objects "
-                             "spread across inclination/altitude bins")
+                        help="Sample this many objects across inc/alt bins")
     parser.add_argument("--n-inc-bins", type=int, default=6)
     parser.add_argument("--n-sma-bins", type=int, default=6)
-    
-    parser.add_argument("--tle-file", required=True, help="Path to TLE file")
-    parser.add_argument("--meta", required=True, help="Path to .meta.json")
-    parser.add_argument("--durations", required=True, help="Path to durations.json")
-    parser.add_argument("--tau", type=float, default=3e4, help="FOGM time constant [s]")
-    parser.add_argument("--q", type=float, default=1e-19, help="Process noise spectral density")
-    parser.add_argument("--window-days", type=float, default=90.0, 
-                        help="Window length [days] - must match calibration")
-    parser.add_argument("--max-duration-days", type=float, default=7300.0,
-                        help="Cap total history [days] (e.g., 7300 = 20 years)")
-    parser.add_argument("--output", default="results/fleet_validation.json",
-                        help="Output JSON file path")
-    parser.add_argument("--n-workers", type=int, default=8,
-                        help="Number of parallel workers")
-    parser.add_argument("--seed-offset", type=int, default=100000,
-                        help="Base seed for RNG")
-    parser.add_argument("--max-objects", type=int, default=None,
-                        help="Limit number of objects (for testing)")
-    parser.add_argument("--reference-null-mean", type=float, default=REF_NULL_MEAN,
-                        help="Reference null mean for comparison")
-    parser.add_argument("--reference-null-std", type=float, default=REF_NULL_STD,
-                        help="Reference null std for comparison")
-    parser.add_argument("--reference-threshold", type=float, default=REF_NULL_9997PCT,
-                        help="Reference null threshold (99.97th percentile)")
+    parser.add_argument("--tle-file", required=True)
+    parser.add_argument("--meta", required=True)
+    parser.add_argument("--durations", required=True)
+    parser.add_argument("--tau", type=float, default=3e4)
+    parser.add_argument("--q", type=float, default=1e-19)
+    parser.add_argument("--window-days", type=float, default=90.0)
+    parser.add_argument("--max-duration-days", type=float, default=7300.0)
+    parser.add_argument("--output", default="results/fleet_validation.json")
+    parser.add_argument("--n-workers", type=int, default=8)
+    parser.add_argument("--seed-offset", type=int, default=100000)
+    parser.add_argument("--max-objects", type=int, default=None)
+    parser.add_argument("--reference-null-mean", type=float, default=REF_NULL_MEAN)
+    parser.add_argument("--reference-null-std", type=float, default=REF_NULL_STD)
+    parser.add_argument("--reference-threshold", type=float, default=REF_NULL_9997PCT)
     args = parser.parse_args()
 
-    # --- Load data ---
     print(f"Loading TLEs from {args.tle_file}...")
     tle_tuples = load_tles_from_file(args.tle_file)
     print(f"Loaded {len(tle_tuples)} TLEs")
@@ -514,7 +421,6 @@ def main():
     with open(args.durations) as f:
         durations_map = json.load(f)
 
-    # --- Build object list ---
     objects_to_process = []
     for rec in meta_records:
         norad_id = str(rec.get("NORAD_CAT_ID", ""))
@@ -532,7 +438,7 @@ def main():
         tle_data["inclination"] = float(rec.get("INCLINATION", 0))
         tle_data["periapsis"] = float(rec.get("PERIAPSIS", 0))
         tle_data["apoapsis"] = float(rec.get("APOAPSIS", 0))
-        
+
         objects_to_process.append({
             "norad_id": norad_id,
             "tle_data": tle_data,
@@ -550,32 +456,21 @@ def main():
 
     print(f"Processing {len(objects_to_process)} objects, window_days={args.window_days:.0f}...")
 
-    # --- Process in parallel ---
     tasks = [
-        (
-            obj["tle_data"],
-            obj["duration_days"],
-            args.tau,
-            args.q,
-            args.window_days,
-            args.seed_offset,
-            idx
-        )
+        (obj["tle_data"], obj["duration_days"], args.tau, args.q,
+         args.window_days, args.seed_offset, idx)
         for idx, obj in enumerate(objects_to_process)
     ]
 
-    # Pre-calculate total expected windows for true % progress
     total_windows_expected = sum(
         int(obj["duration_days"] // args.window_days)
         for obj in objects_to_process
     )
-    report_interval = max(1, int(total_windows_expected * 0.05))  # every 5%
+    report_interval = max(1, int(total_windows_expected * 0.05))
     if total_windows_expected == 0:
         report_interval = 1
 
-    print(f"Using {args.n_workers} workers...")
-    print(f"Total expected windows: {total_windows_expected} "
-          f"(will report every ~{report_interval} windows)")
+    print(f"Using {args.n_workers} workers, {total_windows_expected} expected windows")
 
     results = []
     windows_done = 0
@@ -583,10 +478,8 @@ def main():
     t0 = time.time()
 
     with mp.Pool(args.n_workers) as pool:
-        # imap_unordered lets us tally progress as each object finishes
         iter_results = pool.imap_unordered(
-            process_one_wrapper,
-            tasks,
+            process_one_wrapper, tasks,
             chunksize=max(1, len(tasks) // (args.n_workers * 4))
         )
 
@@ -609,34 +502,30 @@ def main():
                     eta_str = f"{eta_s/3600:.1f}h"
 
                 print(f"  [{windows_done:>6}/{total_windows_expected:<6} windows] "
-                      f"{pct:>5.1f}% | {len(results):>5}/{len(tasks)} objects | "
-                      f"ETA: {eta_str}")
+                      f"{pct:>5.1f}% | {len(results):>5}/{len(tasks)} objects | ETA: {eta_str}")
 
-                # advance to next 5% milestone
                 while next_report <= windows_done:
                     next_report += report_interval
 
-    print(f"Finished all {len(results)} objects ({windows_done} windows) in "
+    print(f"Finished {len(results)} objects ({windows_done} windows) in "
           f"{(time.time()-t0)/60:.1f} min")
 
-    # --- Analyze results ---
     successful = [r for r in results if r["success"]]
     failed = [r for r in results if not r["success"]]
-    
+
     all_windows = [w for r in successful for w in r["windows"]]
     total_windows = len(all_windows)
     ok_windows = [w for w in all_windows if w.get("peak_maha") is not None]
     bad_windows = total_windows - len(ok_windows)
 
-    print(f"\nCompleted: {len(successful)} objects succeeded, {len(failed)} objects failed entirely")
-    print(f"Total windows analyzed: {total_windows} ({len(ok_windows)} clean, {bad_windows} diverged/skipped)")
+    print(f"\nCompleted: {len(successful)} ok, {len(failed)} failed")
+    print(f"Windows: {total_windows} total ({len(ok_windows)} clean, {bad_windows} diverged)")
 
     if failed:
-        print("\nFirst few object-level failures:")
+        print("First few failures:")
         for f in failed[:5]:
             print(f"  {f['norad_id']}: {f['error']}")
 
-    # --- Save results ---
     output_data = {
         "config": {
             "tau": args.tau,
@@ -651,81 +540,51 @@ def main():
         "failed": failed,
     }
 
-    import os
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     with open(args.output, "w") as f:
         json.dump(output_data, f, indent=2)
-    print(f"\nSaved results to {args.output}")
+    print(f"Saved to {args.output}")
 
-    # --- Compare to reference null ---
     if ok_windows:
         peaks = np.array([w["peak_maha"] for w in ok_windows])
-        print(f"\n{'='*60}")
-        print("WINDOW-LEVEL PEAK MAHALANOBIS DISTRIBUTION")
-        print(f"{'='*60}")
-        print(f"  Mean:  {peaks.mean():.3f}")
-        print(f"  Std:   {peaks.std():.3f}")
-        print(f"  Min:   {peaks.min():.3f}")
-        print(f"  Max:   {peaks.max():.3f}")
-        print(f"  95%:   {np.percentile(peaks, 95):.3f}")
-        print(f"  99%:   {np.percentile(peaks, 99):.3f}")
-        print(f"  99.9%: {np.percentile(peaks, 99.9):.3f}")
+        print(f"\nPeak Mahalanobis:")
+        print(f"  mean={peaks.mean():.3f}  std={peaks.std():.3f}")
+        print(f"  min={peaks.min():.3f}  max={peaks.max():.3f}")
+        print(f"  95%={np.percentile(peaks, 95):.3f}  "
+              f"99%={np.percentile(peaks, 99):.3f}  "
+              f"99.9%={np.percentile(peaks, 99.9):.3f}")
 
-        print(f"\n{'='*60}")
-        print("COMPARISON TO REFERENCE NULL CALIBRATION")
-        print(f"{'='*60}")
-        print(f"  Reference null mean:     {args.reference_null_mean:.3f}")
-        print(f"  This run mean:           {peaks.mean():.3f}")
-        print(f"  Difference:              {peaks.mean() - args.reference_null_mean:.3f} "
-              f"({100*(peaks.mean() - args.reference_null_mean)/args.reference_null_mean:.1f}%)")
-        print(f"  Reference null std:      {args.reference_null_std:.3f}")
-        print(f"  This run std:            {peaks.std():.3f}")
-        print(f"  Reference 99.97th pct:   {args.reference_threshold:.3f}")
-        print(f"  This run 99.97th pct:    {np.percentile(peaks, 99.97):.3f}")
-        
-        if abs(peaks.mean() - args.reference_null_mean) > 0.5:
-            print("\n⚠️  WARNING: This run's mean differs significantly from reference.")
-            print("   This suggests orbit-dependent filter behavior or a setup mismatch.")
-            print("   Investigate by grouping results by inclination/altitude.")
-        else:
-            print("\n✅ This run's distribution matches the reference null calibration.")
-            print("   The filter behaves consistently across different orbits.")
+        print(f"\nvs reference null:")
+        print(f"  ref mean={args.reference_null_mean:.3f}  this={peaks.mean():.3f}  "
+              f"Δ={peaks.mean() - args.reference_null_mean:.3f}")
+        print(f"  ref std={args.reference_null_std:.3f}  this={peaks.std():.3f}")
+        print(f"  ref 99.97%={args.reference_threshold:.3f}  "
+              f"this={np.percentile(peaks, 99.97):.3f}")
 
-        # --- Group by inclination ---
-        print(f"\n{'='*60}")
-        print("DISTRIBUTION BY INCLINATION BIN")
-        print(f"{'='*60}")
-        
+        print("\nBy inclination:")
         inc_bins = [(0, 30), (30, 60), (60, 90), (90, 120), (120, 150), (150, 180)]
         for lo, hi in inc_bins:
             peaks_in_bin = []
             for r in successful:
-                norad_id = r["norad_id"]
-                # Find the object's inclination
-                obj = next((o for o in objects_to_process if o["norad_id"] == norad_id), None)
+                obj = next((o for o in objects_to_process if o["norad_id"] == r["norad_id"]), None)
                 if obj is None:
                     continue
-                inc = obj["inclination"]
-                if lo <= inc < hi:
+                if lo <= obj["inclination"] < hi:
                     for w in r["windows"]:
                         if w.get("peak_maha") is not None:
                             peaks_in_bin.append(w["peak_maha"])
-            
             if peaks_in_bin:
-                print(f"  {lo:3d}-{hi:3d}°: n={len(peaks_in_bin):4d}, mean={np.mean(peaks_in_bin):.3f}, std={np.std(peaks_in_bin):.3f}")
+                print(f"  {lo:3d}-{hi:3d}°: n={len(peaks_in_bin):4d}  "
+                      f"mean={np.mean(peaks_in_bin):.3f}  std={np.std(peaks_in_bin):.3f}")
             else:
                 print(f"  {lo:3d}-{hi:3d}°: no objects")
-            print(f"\n{'='*60}")
-            
-        print("DISTRIBUTION BY ALTITUDE BIN")
-        print(f"{'='*60}")
 
+        print("\nBy altitude:")
         sma_bins = [(700, 800), (800, 900), (900, 1000), (1000, 1100)]
         for lo, hi in sma_bins:
             peaks_in_bin = []
             for r in successful:
-                norad_id = r["norad_id"]
-                obj = next((o for o in objects_to_process if o["norad_id"] == norad_id), None)
+                obj = next((o for o in objects_to_process if o["norad_id"] == r["norad_id"]), None)
                 if obj is None:
                     continue
                 if lo <= obj["sma_km"] < hi:
@@ -733,26 +592,10 @@ def main():
                         if w.get("peak_maha") is not None:
                             peaks_in_bin.append(w["peak_maha"])
             if peaks_in_bin:
-                print(f"  {lo:4d}-{hi:<4d}km: n={len(peaks_in_bin):5d}, "
-                      f"mean={np.mean(peaks_in_bin):.3f}, std={np.std(peaks_in_bin):.3f}")
+                print(f"  {lo:4d}-{hi:<4d}km: n={len(peaks_in_bin):5d}  "
+                      f"mean={np.mean(peaks_in_bin):.3f}  std={np.std(peaks_in_bin):.3f}")
             else:
                 print(f"  {lo:4d}-{hi:<4d}km: no objects")
-
-    print(f"\n{'='*60}")
-    print("INTERPRETATION")
-    print(f"{'='*60}")
-    print("This is a VALIDATION TEST using SYNTHETIC data (one TLE per object).")
-    print("It does NOT detect real debris.")
-    print("")
-    print("Purpose:")
-    print("  1. Verify filter stability on real orbits")
-    print("  2. Identify orbit-dependent performance")
-    print("  3. Compare to the fixed-orbit null calibration")
-    print("")
-    print("Next steps:")
-    print("  1. If mean ≈ 3.17: Filter is stable across orbits")
-    print("  2. If mean ≠ 3.17: Investigate orbit-dependent behavior")
-    print("  3. Then: Build real data pipeline with full TLE histories")
 
 
 if __name__ == "__main__":

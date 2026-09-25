@@ -130,7 +130,7 @@ def plot_sobol(sobol_result, output_path):
     ax.set_ylim(0, max(max(st_vals), max(s1_vals)) * 1.2)
 
     # Add identifiability annotation
-    from phase1_sobol import compute_identifiability
+    from DRIFTED.legacy.phase1.phase1_sobol import compute_identifiability
     ident = compute_identifiability(sobol_result)
     ax.text(0.02, 0.98, f"rho identifiability: {ident['score']:.3f}\n({ident['status']})",
            transform=ax.transAxes, ha='left', va='top', fontsize=10,

@@ -10,3 +10,4 @@
 *.OUT
 */flux_analysis/results-ORDEM/
 */flux_analysis/results-MASTER/
+*.npz

@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""Interpolate ORDEM and MASTER flux from flux_comparison.csv to full fleet.
+"""Interpolate ORDEM/MASTER flux from flux_comparison.csv onto the full fleet.
 
-Reads the 20 discrete (altitude, inclination) points from flux_comparison.csv,
-builds 2D interpolators, and assigns per-object flux values based on each
-satellite's altitude and inclination from TLE metadata.
-
-Outputs:
-  results/ordem_flux_per_object.json
-  results/master_flux_per_object.json
+Reads the discrete (altitude, inclination) grid, builds 2D interpolators,
+and assigns per-object flux from each satellite's altitude and inclination.
 
 Usage:
     python -m phase2_filter.interpolate_flux_to_fleet \
@@ -18,8 +13,9 @@ Usage:
         --output-master results/master_flux_per_object.json
 """
 import argparse
+import csv
 import json
-import math
+import os
 
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
@@ -28,7 +24,6 @@ from TLE.tle_io import parse_tle, load_tles_from_file
 
 
 def load_objects_with_altitude(tle_file: str, meta_file: str, durations_file: str):
-    """Load objects with computed altitude from TLE."""
     tle_tuples = load_tles_from_file(tle_file)
     with open(meta_file) as f:
         meta_records = json.load(f)
@@ -47,9 +42,7 @@ def load_objects_with_altitude(tle_file: str, meta_file: str, durations_file: st
         tle_data = tle_map[norad_id]
         duration_days = durations_map[norad_id].get("duration_days", 0)
 
-        # Compute altitude from semi-major axis
         a = tle_data.get("a", 0)
-        # a is in meters from parse_tle
         altitude_km = (a - 6371000.0) / 1000.0 if a > 6371000 else 0.0
         inclination_deg = float(rec.get("INCLINATION", 0))
 
@@ -64,15 +57,8 @@ def load_objects_with_altitude(tle_file: str, meta_file: str, durations_file: st
 
 
 def build_interpolator(flux_csv: str, model: str = "ordem"):
-    """Build 2D interpolator from flux_comparison.csv.
-
-    model: 'ordem' or 'master'
-    """
-    import csv
-
-    alts = []
-    incs = []
-    fluxes = []
+    """Build 2D interpolator from flux_comparison.csv (model = 'ordem' or 'master')."""
+    alts, incs, fluxes = [], [], []
 
     with open(flux_csv) as f:
         reader = csv.DictReader(f)
@@ -95,11 +81,9 @@ def build_interpolator(flux_csv: str, model: str = "ordem"):
     incs = np.array(incs)
     fluxes = np.array(fluxes)
 
-    # Get unique sorted grid points
     alt_grid = np.unique(alts)
     inc_grid = np.unique(incs)
 
-    # Build flux matrix
     flux_grid = np.zeros((len(alt_grid), len(inc_grid)))
     for i, alt in enumerate(alt_grid):
         for j, inc in enumerate(inc_grid):
@@ -112,7 +96,7 @@ def build_interpolator(flux_csv: str, model: str = "ordem"):
         flux_grid,
         method="linear",
         bounds_error=False,
-        fill_value=None,  # extrapolates with nearest
+        fill_value=None,
     )
 
     return interpolator, alt_grid, inc_grid
@@ -132,21 +116,18 @@ def main():
     objects = load_objects_with_altitude(args.tle_file, args.meta, args.durations)
     print(f"Loaded {len(objects)} objects")
 
-    # Build interpolators
     print("Building ORDEM interpolator...")
     ordem_interp, alt_g, inc_g = build_interpolator(args.flux_csv, "ordem")
-    print(f"  Grid: altitudes {alt_g.tolist()}, inclinations {inc_g.tolist()}")
+    print(f"  Grid: alts {alt_g.tolist()}, incs {inc_g.tolist()}")
 
     print("Building MASTER interpolator...")
     master_interp, _, _ = build_interpolator(args.flux_csv, "master")
 
-    # Interpolate
     ordem_results = {}
     master_results = {}
 
     alt_min, alt_max = alt_g.min(), alt_g.max()
     inc_min, inc_max = inc_g.min(), inc_g.max()
-
     n_outside_alt = 0
     n_outside_inc = 0
 
@@ -155,7 +136,6 @@ def main():
         alt = obj["altitude_km"]
         inc = obj["inclination_deg"]
 
-        # Clamp to interpolation domain for sanity
         if alt < alt_min or alt > alt_max:
             n_outside_alt += 1
         if inc < inc_min or inc > inc_max:
@@ -183,23 +163,20 @@ def main():
     if n_outside_inc:
         print(f"  Warning: {n_outside_inc} objects outside inclination grid (extrapolated)")
 
-    # Save
-    import os
     os.makedirs("results", exist_ok=True)
     with open(args.output_ordem, "w") as f:
         json.dump(ordem_results, f, indent=2)
     with open(args.output_master, "w") as f:
         json.dump(master_results, f, indent=2)
 
-    print(f"\nSaved ORDEM flux for {len(ordem_results)} objects to {args.output_ordem}")
-    print(f"Saved MASTER flux for {len(master_results)} objects to {args.output_master}")
+    print(f"\nSaved ORDEM ({len(ordem_results)}) → {args.output_ordem}")
+    print(f"Saved MASTER ({len(master_results)}) → {args.output_master}")
 
-    # Summary stats
     ordem_vals = [v["flux_impacts_per_m2_per_year"] for v in ordem_results.values()]
     master_vals = [v["flux_impacts_per_m2_per_year"] for v in master_results.values()]
-    print(f"\nORDEM flux:  mean={np.mean(ordem_vals):.4f}, median={np.median(ordem_vals):.4f}")
-    print(f"MASTER flux: mean={np.mean(master_vals):.4f}, median={np.median(master_vals):.4f}")
-    print(f"Ratio (ORDEM/MASTER): {np.mean(ordem_vals)/np.mean(master_vals):.1f}x")
+    print(f"\nORDEM:  mean={np.mean(ordem_vals):.4f}  median={np.median(ordem_vals):.4f}")
+    print(f"MASTER: mean={np.mean(master_vals):.4f}  median={np.median(master_vals):.4f}")
+    print(f"Ratio ORDEM/MASTER: {np.mean(ordem_vals)/np.mean(master_vals):.1f}x")
 
 
 if __name__ == "__main__":

@@ -1,50 +1,18 @@
-#!/usr/bin/env python3
-"""Gate 2 confounder analysis for DRIFTS.
+"""Gate 2 confounder analysis.
 
-Runs the fleet null test with controlled model mismatches between
-truth propagation (always full model) and filter estimation (degraded
-model depending on confounder scenario).
-
-Individual confounder runs diagnose which mismatches are dangerous.
-The combined run gives the extrinsic false-positive rate r_extrinsic.
-
-Truth always gets:
-  - Time-varying F10.7 (annual + Carrington cycles)
-  - Sampled geomagnetic storm events
-  - Drifting drag coefficient (FOGM around object's true Cd_base)
-  - Full SRP and third-body perturbations
-  - Actual measurement noise R_DIAG_ELEMENTS
-
-Filter gets a degraded version per confounder:
-  baseline       : matched to truth (reproduces Gate 1)
-  f107_flat      : constant F107_BASELINE (no solar cycle knowledge)
-  kp_quiet       : constant QUIET_KP (no storm knowledge)
-  env_flat       : both flat F10.7 and quiet Kp (no space weather at all)
-  cd_nominal     : fixed Cd=2.2 (population mean, not object's true Cd)
-  r_overconfident: R_DIAG_ELEMENTS / 10 (thinks TLEs are 10x better)
-  all            : combined realistic mismatch (env_flat + cd_nominal)
-                   Does NOT include r_overconfident (scaling artifact)
+Runs the fleet null test with controlled model mismatches between truth
+(full model) and filter (degraded per confounder). Individual runs diagnose
+which mismatches matter; the combined 'all' run gives r_extrinsic.
 
 Usage:
-    # Individual confounders (diagnostic)
-    python -m phase2_filter.gate2_confounders \\
-        --tle-file TLE/real_tles.tle \\
-        --meta TLE/real_tles.tle.meta.json \\
-        --durations TLE/real_tles.tle.durations.json \\
-        --stratified-sample 100 \\
-        --confounders baseline,f107_flat,kp_quiet,env_flat,cd_nominal,r_overconfident \\
-        --n-workers 8 --threshold 13.258 \\
+    python -m phase2_filter.gate2_confounders \
+        --tle-file TLE/real_tles.tle \
+        --meta TLE/real_tles.tle.meta.json \
+        --durations TLE/real_tles.tle.durations.json \
+        --stratified-sample 100 \
+        --confounders baseline,f107_flat,kp_quiet,env_flat,cd_nominal,r_overconfident \
+        --n-workers 8 --threshold 13.258 \
         --output results/gate2_confounders.json
-
-    # Combined run (the actual r_extrinsic)
-    python -m phase2_filter.gate2_confounders \\
-        --tle-file TLE/real_tles.tle \\
-        --meta TLE/real_tles.tle.meta.json \\
-        --durations TLE/real_tles.tle.durations.json \\
-        --stratified-sample 1000 \\
-        --confounders all \\
-        --n-workers 9 --threshold 13.258 \\
-        --output results/gate2_all.json
 """
 import argparse
 import json
@@ -73,9 +41,6 @@ from constants.constants import (
 
 SANITY_CEILING = 1.0e4
 
-# ---------------------------------------------------------------------------
-# Confounder registry
-# ---------------------------------------------------------------------------
 ALL_CONFOUNDERS = [
     "baseline",
     "f107_flat",
@@ -95,9 +60,6 @@ def _parse_confounders(s: str) -> List[str]:
     return names
 
 
-# ---------------------------------------------------------------------------
-# Object loading & stratified sampling (copied from fleet_null_test.py)
-# ---------------------------------------------------------------------------
 def stratified_sample(objects_to_process, n_target=500, n_inc_bins=6, n_sma_bins=6, seed=42):
     rng_local = np.random.default_rng(seed)
     incs = np.array([o["inclination"] for o in objects_to_process])
@@ -158,9 +120,6 @@ def load_objects(tle_file: str, meta_file: str, durations_file: str,
     return objects_to_process
 
 
-# ---------------------------------------------------------------------------
-# Truth propagation (full model — identical for all confounders)
-# ---------------------------------------------------------------------------
 def propagate_truth_from_tle(
     tle: Dict, epoch_jd: float, duration_s: float, dt_s: float,
     area: float = 1.0, mass: float = 200.0, f107_base: float = F107_BASELINE,
@@ -229,9 +188,6 @@ def generate_noisy_measurements_from_truth(
     return meas
 
 
-# ---------------------------------------------------------------------------
-# Filter runner with confounder support
-# ---------------------------------------------------------------------------
 def _build_initial_state(el: MeanElements) -> np.ndarray:
     h, k = hk_from_e_argp(el.ecc, el.argp)
     x0 = np.zeros(9)
@@ -271,27 +227,20 @@ def _run_one_window_confounder(
     Cd_truth_base: float,
     confounder: str,
 ) -> Dict:
-    """Run forward+backward+smoother with a specific confounder mismatch.
-
-    Truth always used full model (time-varying F10.7, storms, drifting Cd).
-    Filter gets degraded version based on confounder.
-    """
-    # Determine filter parameters based on confounder
+    """Forward+backward+smoother with a specific confounder mismatch."""
     cd_filter = Cd_truth_base
     r_filter = R_DIAG_ELEMENTS.copy()
 
     if confounder in ("cd_nominal", "all"):
-        cd_filter = 2.2  # population mean, not object's true Cd
+        cd_filter = 2.2
 
     if confounder == "r_overconfident":
-        r_filter = R_DIAG_ELEMENTS * 0.1  # overconfident by 10x
-    # Note: "all" does NOT include R overconfidence — that's a scaling artifact,
-    # not a realistic model mismatch. "all" = env_flat + cd_nominal only.
+        r_filter = R_DIAG_ELEMENTS * 0.1
+    # "all" = env_flat + cd_nominal only (no R overconfidence)
 
     x0 = _build_initial_state(el_window_start)
     P0 = _build_initial_covariance(el_window_start)
 
-    # --- Forward pass ---
     ekf_fwd = EKF(x0, P0, cd_filter, area, mass, epoch_jd, tau=tau, q=q, direction="forward")
     fwd_states, fwd_covs = [], []
     prev_t = 0.0
@@ -300,7 +249,6 @@ def _run_one_window_confounder(
         dt = t_rel - prev_t
         abs_t = base_t_offset + prev_t
 
-        # Confounder-specific environment for filter
         if confounder in ("f107_flat", "env_flat", "all"):
             f107 = F107_BASELINE
         else:
@@ -317,7 +265,6 @@ def _run_one_window_confounder(
         fwd_covs.append(ekf_fwd.P.copy())
         prev_t = t_rel
 
-    # --- Backward pass ---
     x0_bwd = fwd_states[-1].copy()
     P0_bwd = fwd_covs[-1].copy() * 100.0
 
@@ -344,16 +291,14 @@ def _run_one_window_confounder(
         ekf_bwd.update(z, r_filter)
         prev_t = t_rel
 
-    # --- Smoother ---
     sm_states, sm_covs = fraser_potter_smoother(
         fwd_states, fwd_covs,
         list(reversed(bwd_apriori_states)),
         list(reversed(bwd_apriori_covs))
     )
 
-    # --- Mahalanobis distance (full window, matching Gate 1) ---
     mask = np.zeros(9, dtype=bool)
-    mask[0] = True  # restrict to 'a' index
+    mask[0] = True
 
     maha = compute_mahalanobis_distance(
         fwd_states, fwd_covs,
@@ -382,8 +327,7 @@ def run_confounders_on_object(
     seed: int,
     confounders: List[str],
 ) -> Dict:
-    """Process a single object: propagate truth once, then run filter
-    for each confounder on the same measurements."""
+    """Propagate truth once, then run filter for each confounder on the same measurements."""
     try:
         rng = np.random.default_rng(seed)
         epoch_jd = tle_data["epoch_jd"]
@@ -403,19 +347,15 @@ def run_confounders_on_object(
         duration_days_used = n_windows * window_days
         duration_s = duration_days_used * 86400.0
 
-        # Propagate truth ONCE (full model)
         truth_hist, storms, f107_phases, Cd_truth_base = propagate_truth_from_tle(
             tle_data, epoch_jd, duration_s, dt_s,
             area=area, mass=mass, rng=rng
         )
 
-        # Generate noisy measurements ONCE
         measurements = generate_noisy_measurements_from_truth(truth_hist, rng=rng)
 
-        # Initialize per-confounder peak storage
         confounder_peaks = {c: [] for c in confounders}
 
-        # Process each window
         for w in range(n_windows):
             w_start_s = w * window_days * 86400.0
             w_end_s = (w + 1) * window_days * 86400.0
@@ -441,7 +381,6 @@ def run_confounders_on_object(
                 M=truth_hist["M"][idx_truth]
             )
 
-            # Run each confounder on the same window
             for c in confounders:
                 try:
                     result = _run_one_window_confounder(
@@ -450,7 +389,7 @@ def run_confounders_on_object(
                         rng, Cd_truth_base, c
                     )
                     confounder_peaks[c].append(result["peak_maha"])
-                except Exception as e:
+                except Exception:
                     confounder_peaks[c].append(None)
 
         return {
@@ -480,9 +419,6 @@ def process_one_wrapper(args):
     )
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Gate 2 confounder analysis")
     parser.add_argument("--tle-file", required=True)
@@ -495,10 +431,10 @@ def main():
     parser.add_argument("--stratified-sample", type=int, default=None)
     parser.add_argument("--n-inc-bins", type=int, default=6)
     parser.add_argument("--n-sma-bins", type=int, default=6)
-    parser.add_argument("--confounders", type=str, default="baseline,f107_flat,kp_quiet,env_flat,cd_nominal,r_overconfident",
-                        help=f"Comma-separated list from: {','.join(ALL_CONFOUNDERS)}")
-    parser.add_argument("--threshold", type=float, default=13.258,
-                        help="Gate 1 null threshold (99.97th percentile)")
+    parser.add_argument("--confounders", type=str,
+                        default="baseline,f107_flat,kp_quiet,env_flat,cd_nominal,r_overconfident",
+                        help=f"Comma-separated from: {','.join(ALL_CONFOUNDERS)}")
+    parser.add_argument("--threshold", type=float, default=13.258)
     parser.add_argument("--n-workers", type=int, default=8)
     parser.add_argument("--seed-offset", type=int, default=300000)
     parser.add_argument("--max-objects", type=int, default=None)
@@ -506,13 +442,11 @@ def main():
     args = parser.parse_args()
 
     confounders = _parse_confounders(args.confounders)
-    print(f"Gate 2 confounder analysis")
-    print(f"  Confounders: {confounders}")
-    print(f"  Threshold:   {args.threshold:.3f}")
-    print(f"  tau={args.tau:.3e}, q={args.q:.3e}, window={args.window_days:.0f}d")
+    print(f"Gate 2: {confounders}")
+    print(f"  threshold={args.threshold:.3f}  tau={args.tau:.3e}  "
+          f"q={args.q:.3e}  window={args.window_days:.0f}d")
     print()
 
-    # Load objects
     objects_to_process = load_objects(
         args.tle_file, args.meta, args.durations,
         max_duration_days=args.max_duration_days,
@@ -529,19 +463,17 @@ def main():
 
     print(f"Processing {len(objects_to_process)} objects...")
 
-    # Build tasks
     tasks = [
-        (
-            obj["tle_data"], obj["duration_days"],
-            args.tau, args.q, args.window_days,
-            args.seed_offset, idx, confounders
-        )
+        (obj["tle_data"], obj["duration_days"],
+         args.tau, args.q, args.window_days,
+         args.seed_offset, idx, confounders)
         for idx, obj in enumerate(objects_to_process)
     ]
 
-    total_windows_expected = sum(int(obj["duration_days"] // args.window_days) for obj in objects_to_process)
-    print(f"Total expected windows: {total_windows_expected}")
-    print(f"Using {args.n_workers} workers...")
+    total_windows_expected = sum(
+        int(obj["duration_days"] // args.window_days) for obj in objects_to_process
+    )
+    print(f"Expected windows: {total_windows_expected}, workers: {args.n_workers}")
     print()
 
     results = []
@@ -558,17 +490,15 @@ def main():
                 pct = 100.0 * i / len(tasks)
                 elapsed = time.time() - t0
                 eta = (len(tasks) - i) * (elapsed / i) if i > 0 else 0
-                print(f"  [{i:>4}/{len(tasks)} objects] {pct:>5.1f}% | ETA: {eta/60:.1f}m")
+                print(f"  [{i:>4}/{len(tasks)}] {pct:>5.1f}%  ETA {eta/60:.1f}m")
 
     elapsed_total = time.time() - t0
     print(f"\nFinished {len(results)} objects in {elapsed_total/60:.1f} min")
 
-    # Aggregate results
     successful = [r for r in results if r["success"]]
     failed = [r for r in results if not r["success"]]
     print(f"Successful: {len(successful)}, Failed: {len(failed)}")
 
-    # Collect peaks per confounder
     all_peaks = {c: [] for c in confounders}
     for r in successful:
         peaks_dict = r.get("confounder_peaks", {})
@@ -576,41 +506,30 @@ def main():
             if c in peaks_dict:
                 all_peaks[c].extend([p for p in peaks_dict[c] if p is not None])
 
-    # Summary table
-    print(f"\n{'='*70}")
-    print("GATE 2 CONFOUNTER FALSE-POSITIVE RATES")
-    print(f"{'='*70}")
-    print(f"{'Scenario':<25} {'N windows':>10} {'Mean':>8} {'Std':>8} {'99.97%':>8} {'FP rate':>10}")
-    print(f"{'-'*70}")
+    print(f"\n{'Scenario':<25} {'N':>8} {'Mean':>8} {'Std':>8} {'99.97%':>8} {'FP rate':>10}")
+    print("-" * 70)
 
     summary = {}
     for c in confounders:
         peaks = np.array(all_peaks[c])
         n = len(peaks)
         if n == 0:
-            print(f"{c:<25} {0:>10} {'N/A':>8} {'N/A':>8} {'N/A':>8} {'N/A':>10}")
+            print(f"{c:<25} {0:>8} {'N/A':>8} {'N/A':>8} {'N/A':>8} {'N/A':>10}")
             summary[c] = {"n": 0, "mean": None, "std": None, "pct9997": None, "fp_rate": None}
             continue
         mean = float(np.mean(peaks))
         std = float(np.std(peaks))
         pct9997 = float(np.percentile(peaks, 99.97))
         fp_rate = float(np.mean(peaks > args.threshold))
-        print(f"{c:<25} {n:>10} {mean:>8.3f} {std:>8.3f} {pct9997:>8.3f} {fp_rate*100:>9.4f}%")
+        print(f"{c:<25} {n:>8} {mean:>8.3f} {std:>8.3f} {pct9997:>8.3f} {fp_rate*100:>9.4f}%")
         summary[c] = {
             "n": n, "mean": mean, "std": std,
             "pct9997": pct9997, "fp_rate": fp_rate,
             "fp_rate_percent": fp_rate * 100.0,
         }
 
-    print(f"{'-'*70}")
-    print(f"\nThreshold: {args.threshold:.3f} (Gate 1 99.97th percentile)")
-    print(f"FP rate = fraction of null windows exceeding threshold")
-    print(f"\nInterpretation:")
-    print(f"  - baseline should match Gate 1 (~0.03% FP rate)")
-    print(f"  - Individual confounders show which mismatches matter")
-    print(f"  - 'all' gives the combined extrinsic rate r_extrinsic")
+    print(f"\nThreshold: {args.threshold:.3f}")
 
-    # Save results
     output_data = {
         "config": {
             "tau": args.tau, "q": args.q,
@@ -628,9 +547,8 @@ def main():
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     with open(args.output, "w") as f:
         json.dump(output_data, f, indent=2)
-    print(f"\nSaved results to {args.output}")
+    print(f"Saved to {args.output}")
 
 
 if __name__ == "__main__":
     main()
-    

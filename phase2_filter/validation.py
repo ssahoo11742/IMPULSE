@@ -1,17 +1,17 @@
 """Validation ladder and synthetic measurement generation for the Phase-2 EKF.
 
-Stages (reviewer-mandated order):
-    2a  null test      — zero unmodeled acceleration
-    2b  bias test      — constant injected RSW acceleration
-    2c  impulse test   — single known debris strike
-    2d  detection demo — full clean-vs-debris comparison
+Stages:
+    2a  null test      - zero unmodeled acceleration
+    2b  bias test      - constant injected RSW acceleration
+    2c  impulse test   - single known debris strike
+    2d  detection demo - full clean-vs-debris comparison
 """
-from .ekf import _measurement_function 
+from .ekf import _measurement_function
 import math
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from dataclasses import dataclass
-from .dynamics import hk_from_e_argp   
+from .dynamics import hk_from_e_argp
 from propagator.orbital import (
     MeanElements, brouwer_rates, drag_rates, srp_ecc_rate,
     third_body_rates, mean_to_true_anomaly
@@ -37,15 +37,15 @@ from .test_statistics import (
 )
 
 
-# =============================================================================
+# ---------------------------------------------------------------------------
 # Helpers
-# =============================================================================
+# ---------------------------------------------------------------------------
 
 def _step_truth(el, Cd, area, mass, epoch_jd, t_s, f107, kp, bias_w=None):
-    """Single-step derivative for truth propagation (matches existing physics).
+    """Single-step derivative for truth propagation.
 
-    Optionally adds a constant RSW acceleration ``bias_w`` via the Gauss-VOP
-    B-matrix.
+    Optionally adds a constant RSW acceleration bias_w via the Gauss-VOP
+    B-matrix (orbit-averaged, since bias_w is stepped over a full day).
     """
     alt = el.alt_m()
     rho = density(alt, f107, kp)
@@ -65,21 +65,13 @@ def _step_truth(el, Cd, area, mass, epoch_jd, t_s, f107, kp, bias_w=None):
     d_M = br["n"] + br["dn_j2"]
 
     if bias_w is not None:
-        # NOTE: orbit-averaged, not the instantaneous compute_B_matrix().
-        # bias_w is a CONSTANT acceleration being Euler-stepped over dt_s
-        # (typically a full day - many orbits at LEO altitudes), so the
-        # rate used here needs to already be a secular/time-averaged rate,
-        # the same way brouwer_rates/drag_rates/etc. are. Using the raw
-        # instantaneous B matrix here was aliasing the periodic
-        # within-orbit content into a large spurious daily signal that
-        # swamped the actual injected bias (wrong sign, ~80x magnitude).
+        # orbit-averaged B, not the instantaneous one - bias_w is constant
+        # over a full day, so we need the secular rate
         B = compute_B_matrix_orbit_averaged(el)
         elem_rates = B @ np.asarray(bias_w)
         d_a += elem_rates[0]
 
-        # B-matrix outputs [da/dt, dh/dt, dk/dt, di/dt, dOmega/dt, dM/dt].
-        # _propagate_truth uses classical elements, so convert dh/dt, dk/dt
-        # back to de/dt and dargp/dt via the chain rule.
+        # B outputs [da, dh, dk, di, dOmega, dM]; convert dh/dk back to de/dargp
         h_now, k_now = hk_from_e_argp(el.ecc, el.argp)
         e = el.ecc
         if e > 1e-12:
@@ -90,8 +82,8 @@ def _step_truth(el, Cd, area, mass, epoch_jd, t_s, f107, kp, bias_w=None):
             dargp_bias = 0.0
 
         d_ecc += de_bias
-        d_inc += elem_rates[3]      # di/dt
-        d_raan += elem_rates[4]     # dOmega/dt
+        d_inc += elem_rates[3]
+        d_raan += elem_rates[4]
         d_argp += dargp_bias
         d_M += elem_rates[5]
 
@@ -110,28 +102,18 @@ def _propagate_truth(
     rng: Optional[np.random.Generator] = None,
     bias_w: Optional[np.ndarray] = None,
     strike_time: Optional[float] = None,
-    strike_dv_mag: float = 0.006,  # m/s, along -S; default matches the
-                                    # previous hardcoded (1e-4 kg / mass=200) * 12e3 m/s
+    strike_dv_mag: float = 0.006,  # m/s along -S
     vary_cd: bool = True,
     truth_substeps: int = 4,
 ) -> Dict:
-    """Propagate a truth trajectory with optional constant bias or single strike.
+    """Propagate truth with optional constant bias or single strike.
 
-    truth_substeps splits each dt_s Euler step into this many smaller
-    sub-steps for the deterministic + bias rate integration (rates are
-    recomputed each sub-step; environment (f107/kp) and Cd-drift/impact
-    logic stay on the original dt_s cadence - those were designed around
-    daily sampling). This mirrors EKF.predict's own hourly sub-stepping so
-    the truth trajectory isn't systematically less accurate than what the
-    filter is trying to fit against it. With compute_B_matrix_orbit_averaged
-    already handling the bias term's secular-vs-instantaneous mismatch,
-    this is now a secondary numerical-accuracy improvement rather than the
-    primary fix - but it costs little and removes another source of
-    truth/filter inconsistency. Set to 1 to recover the old single-step
-    behavior.
+    truth_substeps splits each dt_s Euler step so the truth trajectory isn't
+    systematically less accurate than the filter's own hourly sub-stepping.
+    Env (f107/kp) and Cd-drift stay on the original daily cadence.
+    Set to 1 for the old single-step behavior.
 
-    Returns a history dict with keys:
-        t, a, e, i, Omega, omega, M, Cd
+    Returns history dict with keys: t, a, e, i, Omega, omega, M, Cd
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -173,9 +155,8 @@ def _propagate_truth(
             el.argp = (el.argp + d_argp * dt_sub) % (2 * math.pi)
             el.M += d_M * dt_sub
 
-        # --- single strike injection ---
+        # single strike injection
         if strike_time is not None and t <= strike_time < t + dt_s:
-            v_circ = math.sqrt(MU / el.a)
             dv_mag = strike_dv_mag
             dv_rsw = np.array([0.0, -dv_mag, 0.0])
             nu, _ = mean_to_true_anomaly(el.M, el.ecc)
@@ -189,7 +170,7 @@ def _propagate_truth(
         if vary_cd:
             Cd += (1.0 / CD_TAU_S) * (Cd_base - Cd) * dt_s + cd_sigma_step * rng.normal()
             Cd = float(np.clip(Cd, CD_MIN, CD_MAX))
-        
+
         t += dt_s
 
         hist["t"].append(t)
@@ -211,8 +192,8 @@ def generate_noisy_measurements(
 ) -> List[Tuple[float, np.ndarray]]:
     """Add Gaussian noise to truth mean elements.
 
-    Returns list of (t, z) where z = [a, e, i, Omega, omega, M].
-    M is kept unwrapped to match the filter's internal integration.
+    Returns list of (t, z) with z = [a, e, i, Omega, omega, M].
+    M stays unwrapped to match the filter.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -286,13 +267,11 @@ def _run_filter_pair(
     storms: Optional[List] = None,
     f107_phases: Optional[Any] = None,
 ) -> Dict:
-    """Run forward EKF, backward EKF, and Fraser–Potter smoother.
+    """Run forward EKF, backward EKF, and Fraser-Potter smoother.
 
-    Returns dict with keys:
-        times, fwd_states, fwd_covs, bwd_states, bwd_covs,
-        sm_states, sm_covs, innovations
+    Returns dict with times, fwd/bwd/sm states and covs, plus innovations.
     """
-    # --- forward pass ---
+    # forward pass
     x0 = _build_initial_state(el0)
     P0 = _build_initial_covariance(el0=el0)
 
@@ -322,12 +301,11 @@ def _run_filter_pair(
         ekf_fwd.update(z, config.R_DIAG_ELEMENTS)
         fwd_states.append(ekf_fwd.x.copy())
         fwd_covs.append(ekf_fwd.P.copy())
-        
+
         innovations.append(_classical_to_hk_measurement(z) - _measurement_function(ekf_fwd.x))
         prev_t = t
 
-    # --- backward pass ---
-       # --- backward pass ---
+    # backward pass
     x0_bwd = fwd_states[-1].copy()
     P0_bwd = fwd_covs[-1].copy() * 100.0
 
@@ -342,20 +320,19 @@ def _run_filter_pair(
 
     for t, z in reversed(measurements):
         dt = t - prev_t
-        # First reversed step is the final epoch: no prediction needed
+        # first reversed step is the final epoch - no prediction needed
         if abs(dt) > 1e-12:
-            # Use prev_t (the later time) for env, matching forward-pass convention
             f107 = f107_at_time(prev_t, f107_phases, f_base=f107_base)
             kp = kp_at_time(prev_t, storms)
             ekf_bwd.predict(dt, f107, kp)
-        
+
         bwd_apriori_states.append(ekf_bwd.x.copy())
         bwd_apriori_covs.append(ekf_bwd.P.copy())
-        
+
         ekf_bwd.update(z, config.R_DIAG_ELEMENTS)
         prev_t = t
-        
-    # --- smoother ---
+
+    # smoother
     sm_states, sm_covs = fraser_potter_smoother(
         fwd_states, fwd_covs,
         list(reversed(bwd_apriori_states)),
@@ -376,12 +353,12 @@ def _run_filter_pair(
     }
 
 
-# =============================================================================
+# ---------------------------------------------------------------------------
 # Validation ladder
-# =============================================================================
+# ---------------------------------------------------------------------------
 
 def _default_el0(alt_km: float = 800.0, inc_deg: float = 40.0) -> MeanElements:
-    """Build a default initial mean element set."""
+    """Default initial mean element set."""
     RE = 6371e3
     a0 = (alt_km * 1000 + RE) / (1 - 0.001)
     return MeanElements(
@@ -466,8 +443,8 @@ def run_bias_test(
     tau = tau if tau is not None else config.DEFAULT_TAU_S
     q_scalar = q if q is not None else config.DEFAULT_Q
 
-    # Only w_S is secularly observable with 1-day cadence.
-    # Suppress random-walk of the unobservable R and W channels.
+    # only w_S is secularly observable at 1-day cadence;
+    # zero out random-walk on the unobservable R and W channels
     q_vec = np.array([0.0, q_scalar, 0.0])
 
     result = _run_filter_pair(
@@ -475,33 +452,20 @@ def run_bias_test(
         storms=storms, f107_phases=f107_phases
     )
 
-    # Steady-state estimated w (interior only, excluding edge transients).
-    #
-    # This margin was originally a flat "30 days of steps" - wrong on two
-    # counts. (1) For runs <=~60 days that's an empty slice -> crash (see
-    # prior fix). (2) More fundamentally: w_R/w_W here have q=0, so the
-    # ONLY way they return to zero after the early-epoch burn-in transient
-    # (the filter overshooting on the unobservable-with-1-sample/day R,W
-    # channels before it has enough data to disambiguate them) is the
-    # deterministic FOGM decay exp(-t/tau). If tau is comparable to or
-    # larger than the trim window, you're averaging the transient itself,
-    # not a converged value - this was silently inflating estimated_w for
-    # R/W by orders of magnitude at tau=1e6s (a ~10-day window against an
-    # 11.6-day tau is < 1 e-folding). So the margin needs to cover several
-    # tau, not just a fixed calendar window.
+    # Steady-state estimated w (interior only, drop edge transients).
+    # Margin needs to cover several tau so we're past the FOGM burn-in,
+    # not just a fixed calendar window.
     n_pts = len(result["fwd_states"])
     margin_burn_in = int(math.ceil(3.0 * tau / dt_s))    # >=3 e-foldings
-    margin_floor = max(3, int(5.0 * 86400.0 / dt_s))     # basic settle time, independent of tau
+    margin_floor = max(3, int(5.0 * 86400.0 / dt_s))
     desired_margin = max(margin_burn_in, margin_floor)
     margin = max(1, min(desired_margin, n_pts // 3))
     if desired_margin > n_pts // 3:
         raise ValueError(
             f"run_bias_test: duration_days={duration_days} (dt_s={dt_s}) gives "
             f"only {n_pts} measurement(s), but tau={tau:.3e}s needs a burn-in "
-            f"margin of ~{margin_burn_in} steps (>=3*tau) to reach steady "
-            f"state, leaving no interior window to average over. Use a "
-            f"longer duration_days (duration >= ~10*tau is a reasonable "
-            f"floor) or a shorter tau."
+            f"margin of ~{margin_burn_in} steps (>=3*tau). Use a longer "
+            f"duration (duration >= ~10*tau) or a shorter tau."
         )
     w_est = np.array([s[6:9] for s in result["fwd_states"][margin:-margin]])
     w_mean = np.mean(w_est, axis=0)

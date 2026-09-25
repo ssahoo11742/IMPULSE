@@ -240,6 +240,9 @@ def main():
     peak_clean = np.array(peak_clean)
     peak_debris = np.array(peak_debris)
 
+    # ------------------------------------------------------------------
+    # Figure 1: WITH threshold line (original)
+    # ------------------------------------------------------------------
     fig, axes = plt.subplots(2, 1, figsize=(10, 8))
 
     # Top: representative acceleration traces (trimmed)
@@ -268,7 +271,7 @@ def main():
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
-    # Bottom: CDF of peak Mahalanobis
+    # Bottom: CDF of peak Mahalanobis (WITH threshold)
     ax = axes[1]
 
     def plot_cdf(data, color, label):
@@ -294,7 +297,56 @@ def main():
     plt.tight_layout()
     plt.savefig('figs/fig5_clean_vs_debris.png', dpi=200, bbox_inches='tight',
                 facecolor='white')
-    print("\nSaved fig5_clean_vs_debris.png")
+    print("\nSaved fig5_clean_vs_debris.png  (with threshold line)")
+
+    # ------------------------------------------------------------------
+    # Figure 2: WITHOUT threshold line
+    # ------------------------------------------------------------------
+    fig2, axes2 = plt.subplots(2, 1, figsize=(10, 8))
+
+    # Top: same acceleration traces
+    ax = axes2[0]
+    ax.plot(representative["t_clean"], representative["a_clean"],
+            color='#2E86AB', lw=1.5, label='Clean trajectory')
+    ax.plot(representative["t_debris"], representative["a_debris"],
+            color='#E63946', lw=1.5, label='Debris trajectory')
+
+    if len(peaks) > 0:
+        ax.scatter(peaks, vals, color='#E63946', s=25, zorder=5)
+
+    ax.axvline(x=TRIM_DAYS, color='#888888', linestyle=':', lw=1.5, alpha=0.5)
+    ax.axvline(x=DURATION_DAYS - TRIM_DAYS, color='#888888',
+               linestyle=':', lw=1.5, alpha=0.5)
+
+    ax.set_ylabel(r'Smoothed acceleration $|w_S|$ [m/s$^2$]', fontsize=12)
+    ax.set_title('Clean vs. Debris Trajectories (90-day window, 7-day trim)',
+                 fontsize=13, fontweight='bold')
+    ax.legend(loc='upper right', fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    # Bottom: CDF WITHOUT the threshold line
+    ax = axes2[1]
+    plot_cdf(peak_clean, '#2E86AB', f'Clean (n={68000})')
+    plot_cdf(peak_debris, '#E63946', f'Debris (n={68000})')
+
+    # No axvline / no η text
+
+    ax.set_xlabel('Peak Mahalanobis distance (semi-major axis only)', fontsize=12)
+    ax.set_ylabel('Cumulative probability', fontsize=12)
+    ax.set_title('Distribution of peak Mahalanobis distances',
+                 fontsize=13, fontweight='bold')
+    ax.legend(loc='lower right', fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    plt.tight_layout()
+    plt.savefig('figs/fig5_clean_vs_debris_no_threshold.png', dpi=200,
+                bbox_inches='tight', facecolor='white')
+    print("Saved fig5_clean_vs_debris_no_threshold.png  (without threshold line)")
+
     print(f"\n  Clean  — Maha mean: {peak_clean.mean():.2f}, median: {np.median(peak_clean):.2f}")
     print(f"  Debris — Maha mean: {peak_debris.mean():.2f}, median: {np.median(peak_debris):.2f}")
     print(f"  Accel  — Clean peak: {np.mean(accel_clean):.2e}, Debris peak: {np.mean(accel_debris):.2e}")

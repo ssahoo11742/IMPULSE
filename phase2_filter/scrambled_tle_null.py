@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Scrambled-TLE null test: measure realistic background rate on real data.
+"""Scrambled-TLE null test: background rate on real data with signal destroyed.
 
-Fits a smooth spline to each object's real TLE history, shuffles the
-residuals in time, rebuilds fake TLEs, and runs the degraded filter.
-This preserves real TLE cadence and noise distribution while destroying
-any coherent physical signal (strikes, maneuvers, etc.).
+Fits a spline to each object's TLE history, shuffles residuals in time,
+rebuilds fake TLEs, and runs the degraded filter. Preserves cadence and
+noise distribution while removing coherent physical signals.
 """
 import argparse
 import json
@@ -31,7 +30,6 @@ MAX_TLES_PER_FILE = 500
 
 
 def load_tles_for_object(fpath: str) -> List[Dict]:
-    """Load TLEs from a single .tle file, capped at MAX_TLES_PER_FILE."""
     tles = []
     try:
         raw = load_tles_from_file(fpath)
@@ -81,11 +79,10 @@ def _build_initial_covariance(el: MeanElements) -> np.ndarray:
     e, argp = el.ecc, el.argp
     R_h = math.sin(argp)**2 * R_DIAG_ELEMENTS[1] + (e * math.cos(argp))**2 * R_DIAG_ELEMENTS[4]
     R_k = math.cos(argp)**2 * R_DIAG_ELEMENTS[1] + (e * math.sin(argp))**2 * R_DIAG_ELEMENTS[4]
-    P0 = np.diag([
+    return np.diag([
         R_DIAG_ELEMENTS[0], R_h, R_k, R_DIAG_ELEMENTS[2], R_DIAG_ELEMENTS[3], R_DIAG_ELEMENTS[5],
         1.0e-6, 1.0e-6, 1.0e-6
     ])
-    return P0
 
 
 def scramble_object(
@@ -107,7 +104,6 @@ def scramble_object(
 
         tle_list = sorted(tle_list, key=lambda t: t.get("epoch_jd", 0))
 
-        # Build measurements from real TLEs
         measurements = []
         epoch0 = tle_list[0].get("epoch_jd", 0)
         for tle in tle_list:
@@ -124,9 +120,8 @@ def scramble_object(
             return {"norad_id": norad_id, "success": False, "error": "too few measurements",
                     "n_valid_windows": 0, "peaks": [], "detected": 0}
 
-        # Fit smooth splines to each element and compute residuals
         t_arr = np.array([t for t, _ in measurements])
-        z_arr = np.array([z for _, z in measurements])  # shape (N, 6)
+        z_arr = np.array([z for _, z in measurements])
 
         if len(t_arr) < 10:
             return {"norad_id": norad_id, "success": False, "error": "too few points for spline",
@@ -142,16 +137,10 @@ def scramble_object(
                 smooth_vals[:, dim] = np.interp(t_arr, t_arr, z_arr[:, dim])
 
         residuals = z_arr - smooth_vals
-
-        # Shuffle residuals in time
         perm = rng.permutation(len(residuals))
-        shuffled_residuals = residuals[perm]
-        z_scrambled = smooth_vals + shuffled_residuals
-
-        # Rebuild scrambled measurements
+        z_scrambled = smooth_vals + residuals[perm]
         scrambled_meas = [(t_arr[i], z_scrambled[i]) for i in range(len(t_arr))]
 
-        # Now run the same filter pipeline as run_real_fleet
         window_s = window_days * 86400.0
         max_t = scrambled_meas[-1][0]
         n_windows = int(max_t // window_s) + 1
@@ -170,7 +159,6 @@ def scramble_object(
             w_end = (w + 1) * window_s
             window_meas = [(t, z) for t, z in scrambled_meas if w_start <= t < w_end]
 
-            # Same quality cuts as patched real fleet
             if len(window_meas) < 15:
                 continue
             times = [t for t, _ in window_meas]
@@ -179,8 +167,7 @@ def scramble_object(
                 continue
             a_start = float(window_meas[0][1][0])
             a_end = float(window_meas[-1][1][0])
-            alt_drop = (a_start - a_end) / 1000.0
-            if abs(alt_drop) > 10.0:
+            if abs((a_start - a_end) / 1000.0) > 10.0:
                 continue
             if w == 0 and total_data_days > 90.0:
                 continue
@@ -292,7 +279,6 @@ def main():
         meta_records = json.load(f)
     norad_ids = {str(r.get("NORAD_CAT_ID", "")) for r in meta_records}
 
-    # Build task list: pass file paths, not TLE data
     objects = []
     for idx, fname in enumerate(sorted(os.listdir(args.tle_history_dir))):
         if not fname.endswith(".tle"):
@@ -305,7 +291,8 @@ def main():
         dur = min(dur, args.max_duration_days)
         if dur < args.window_days:
             continue
-        objects.append((nid, fpath, dur, args.tau, args.q, args.window_days, args.threshold, args.seed_offset + idx))
+        objects.append((nid, fpath, dur, args.tau, args.q, args.window_days,
+                        args.threshold, args.seed_offset + idx))
 
     print(f"Processing {len(objects)} objects...")
 
@@ -322,7 +309,7 @@ def main():
                 pct = 100.0 * i / len(objects)
                 elapsed = time.time() - t0
                 eta = (len(objects) - i) * (elapsed / i) if i > 0 else 0
-                print(f"  [{i:>4}/{len(objects)}] {pct:>5.1f}% | ETA: {eta/60:.1f}m")
+                print(f"  [{i:>4}/{len(objects)}] {pct:>5.1f}%  ETA {eta/60:.1f}m")
 
     successful = [r for r in results if r["success"]]
     print(f"\nFinished. Successful: {len(successful)}, Failed: {len(results) - len(successful)}")
@@ -338,24 +325,18 @@ def main():
     all_peaks_arr = np.array(all_peaks)
     n_total = len(all_peaks_arr)
 
-    print(f"\n{'='*60}")
-    print("SCRAMBLED-TLE NULL TEST RESULTS")
-    print(f"{'='*60}")
-    print(f"Total valid windows:     {total_valid_windows}")
-    print(f"Total peaks computed:    {n_total}")
+    print(f"\nValid windows: {total_valid_windows}")
+    print(f"Peaks: {n_total}")
 
     if n_total > 0:
-        print(f"Mean peak Mahalanobis:   {np.mean(all_peaks_arr):.3f}")
-        print(f"Std peak Mahalanobis:    {np.std(all_peaks_arr):.3f}")
-        print(f"99.97th percentile:      {np.percentile(all_peaks_arr, 99.97):.3f}")
-        print(f"\nThreshold: {args.threshold:.3f}")
-        print(f"Triggers (>thr):         {total_detected}")
+        print(f"Mean peak: {np.mean(all_peaks_arr):.3f}  std: {np.std(all_peaks_arr):.3f}")
+        print(f"99.97th:   {np.percentile(all_peaks_arr, 99.97):.3f}")
+        print(f"Threshold: {args.threshold:.3f}")
+        print(f"Triggers:  {total_detected}")
         r_scrambled = total_detected / total_valid_windows if total_valid_windows > 0 else 0.0
-        print(f"Scrambled FP rate:       {r_scrambled*100:.4f}%")
-        print(f"\nThis is your REALISTIC background rate.")
-        print(f"Use it for: N_FP = {r_scrambled:.6f} * N_windows_valid")
+        print(f"Scrambled FP rate: {r_scrambled*100:.4f}%")
     else:
-        print("\nWARNING: no peaks computed")
+        print("WARNING: no peaks computed")
 
     output_data = {
         "config": {

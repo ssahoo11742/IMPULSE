@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Empirically calibrate measurement noise covariance R from TLE residuals.
-
-CORRECTED VERSION — fixes 5 critical bugs:
-  1. tle_to_element_dict now uses correct keys from parse_tle()
-  2. No double math.radians() — parse_tle already returns radians
-  3. np.polyfit uses CENTERED time (t - t_mean) — eliminates RankWarning
-  4. All angles unwrapped: M, Omega, omega
-  5. maneuver_sigma actually used for sigma-clipping outlier rejection
-"""
+"""Calibrate measurement noise covariance R from TLE residuals."""
 import argparse
 import json
 import math
@@ -25,19 +17,10 @@ ELEMENT_UNITS = ["m", "", "rad", "rad", "rad", "rad"]
 MAX_TLES_PER_FILE = 500
 
 
-# ---------------------------------------------------------------------------
-# Element extraction — FIXED #1 & #2: correct keys, no double radian conversion
-# ---------------------------------------------------------------------------
-
 def tle_to_element_dict(tle: Dict) -> Optional[Dict[str, float]]:
-    """Convert parsed TLE dict to orbital elements.
-    
-    parse_tle() already computes: a (meters), ecc, inc (rad), raan (rad),
-    argp (rad), M (rad). We use those directly.
-    """
+    """Convert parsed TLE dict to orbital elements (a, e, i, Omega, omega, M)."""
     a = tle.get("a")
     if a is None or a <= 0:
-        # Fallback: compute from n_revday if a is missing
         n_rev_per_day = tle.get("n_revday", 0.0)
         if n_rev_per_day <= 0:
             return None
@@ -45,17 +28,13 @@ def tle_to_element_dict(tle: Dict) -> Optional[Dict[str, float]]:
         a = (MU / (n_rad_s ** 2)) ** (1.0 / 3.0)
 
     e = tle.get("ecc", 0.0)
-    i = tle.get("inc", 0.0)          # already radians from parse_tle
-    raan = tle.get("raan", 0.0)      # already radians
-    argp = tle.get("argp", 0.0)      # already radians
-    M = tle.get("M", 0.0)            # already radians
+    i = tle.get("inc", 0.0)       # already rad from parse_tle
+    raan = tle.get("raan", 0.0)
+    argp = tle.get("argp", 0.0)
+    M = tle.get("M", 0.0)
 
     return {"a": a, "e": e, "i": i, "Omega": raan, "omega": argp, "M": M}
 
-
-# ---------------------------------------------------------------------------
-# Angle unwrapping — FIXED #4: unwraps all angles, not just M
-# ---------------------------------------------------------------------------
 
 def unwrap_angles(angles: np.ndarray) -> np.ndarray:
     if len(angles) == 0:
@@ -69,26 +48,21 @@ def unwrap_angles(angles: np.ndarray) -> np.ndarray:
     return unwrapped
 
 
-# ---------------------------------------------------------------------------
-# Polynomial fitting — FIXED #3: centers time before np.polyfit
-# ---------------------------------------------------------------------------
-
 def fit_polynomial(t: np.ndarray, y: np.ndarray, degree: int):
     """Fit polynomial with centered time for numerical stability."""
     if len(t) < degree + 1:
         return None
-    
+
     t_mean = np.mean(t)
     t_centered = t - t_mean
-    
-    # FIXED: NumPy 2.x removed np.RankWarning — suppress all warnings generically
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
             coeffs = np.polyfit(t_centered, y, degree)
         except (np.linalg.LinAlgError, ValueError):
             return None
-    
+
     return coeffs, t_mean
 
 
@@ -99,10 +73,6 @@ def eval_polynomial(t: float, coeffs: np.ndarray, t_mean: float) -> float:
         result = result * t_shifted + c
     return result
 
-
-# ---------------------------------------------------------------------------
-# Residual computation — FIXED #5: outlier rejection actually works
-# ---------------------------------------------------------------------------
 
 def compute_object_residuals(
     tle_list: List[Dict],
@@ -134,7 +104,6 @@ def compute_object_residuals(
     epochs = np.array(epochs)
     t_days = epochs - epochs[0]
 
-    # FIXED #4: unwrap ALL angles
     for elem in ["M", "Omega", "omega"]:
         elements[elem] = list(unwrap_angles(np.array(elements[elem])))
 
@@ -168,7 +137,7 @@ def compute_object_residuals(
             resid = elements[elem][i] - pred
             residuals[elem].append(resid)
 
-    # FIXED #5: sigma-clip outliers using MAD (robust to non-Gaussian tails)
+    # MAD-based sigma clip for maneuver outliers
     if maneuver_sigma > 0:
         for elem in ELEMENT_NAMES:
             vals = np.array(residuals[elem])
@@ -183,10 +152,6 @@ def compute_object_residuals(
 
     return residuals
 
-
-# ---------------------------------------------------------------------------
-# Streaming file loader (unchanged)
-# ---------------------------------------------------------------------------
 
 def load_tle_histories_streaming(tle_dir: str, meta_file: str):
     with open(meta_file) as f:
@@ -235,12 +200,8 @@ def load_tle_histories_streaming(tle_dir: str, meta_file: str):
     return histories
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 def main():
-    parser = argparse.ArgumentParser(description="Calibrate R from TLE residuals (CORRECTED)")
+    parser = argparse.ArgumentParser(description="Calibrate R from TLE residuals")
     parser.add_argument("--tle-history-dir", default=None)
     parser.add_argument("--tle-history-file", default=None)
     parser.add_argument("--meta", required=True)

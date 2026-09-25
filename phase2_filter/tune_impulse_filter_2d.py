@@ -1,22 +1,17 @@
-"""2D grid search over (tau, q) for impulse detection at a fixed duration,
-using a cheap separation-score proxy rather than running a full dv50
-calibration at every candidate (which would be far too slow to grid search
-directly).
+"""2D grid search over (tau, q) for impulse detection at a fixed duration.
 
-Proxy: at a fixed reference dv, compare mean peak Mahalanobis distance WITH
-a real impulse against the null (no-impulse) case, normalized by the
-null's own spread:
+Uses a cheap separation-score proxy instead of a full dv50 calibration at
+every candidate.
+
+Proxy: at a fixed reference dv, compare mean peak Mahalanobis WITH a real
+impulse against the null (no-impulse) case, normalized by the null's spread:
+
     score = (mean_peak_signal - mean_peak_null) / std_peak_null
-Higher score = better separation at that (tau, q). Once you've found the
-best candidate here, refine it with find_dv_threshold.py's full null+sweep
-calibration for a real dv50 number.
 
-This supersedes the informal one-dimensional searches (fix tau, sweep q;
-then fix q, sweep tau) done earlier in this project - those only checked
-slices through the space, not the joint optimum.
+Higher score = better separation. Once you have a winner, refine it with
+find_dv_threshold.py for a real dv50 number.
 
-Usage (this can run a long time - that's expected, not a bug; increase
---coarse-trials for a less noisy result if you have the patience):
+Usage:
     python -m phase2_filter.tune_impulse_filter_2d --duration-days 90 \
         --ref-dv 0.02 --coarse-trials 10 \
         --tau-values 3e4 1e5 3e5 1e6 \
@@ -32,16 +27,13 @@ from .test_statistics import compute_mahalanobis_distance
 
 
 def _peak_maha(res, mask, sanity_ceiling=1.0e4):
-    """sanity_ceiling: numpy's overflow/invalid-value warnings during matrix
-    ops do NOT raise exceptions by default - an overflowed computation can
-    silently produce a technically-finite but absurdly large float (seen in
-    practice: ~1e103) that np.isfinite() would NOT catch (it's not literally
-    inf/nan, just numerical garbage from a diverged filter). Real peak
-    Mahalanobis values in this project have topped out around ~150-200 even
-    at extreme injected dv, so anything past this ceiling is treated as a
-    diverged/failed trial, not a real result - this is what should have made
-    the earlier astronomical "best candidate" (~1e103) get correctly
-    excluded instead of winning by numerical accident."""
+    """Peak Mahalanobis in a +/-1 day window around the strike.
+
+    Overflows during matrix ops can produce huge but finite floats
+    (~1e103) that slip past np.isfinite. Real peaks here top out around
+    150-200 even at extreme dv, so anything above the ceiling is treated
+    as a diverged trial.
+    """
     r = res["result"]
     maha = compute_mahalanobis_distance(
         r["fwd_states"], r["fwd_covs"], r["bwd_states"], r["bwd_covs"], r["sm_covs"],
@@ -54,15 +46,16 @@ def _peak_maha(res, mask, sanity_ceiling=1.0e4):
     if not np.isfinite(peak) or abs(peak) > sanity_ceiling:
         raise RuntimeError(
             f"peak Mahalanobis={peak:.3e} is non-finite or unphysically large - "
-            f"filter has diverged at this (tau, q, duration), not a real result."
+            f"filter diverged at this (tau, q, duration)."
         )
     return peak
 
 
 def _run_one(task):
-    """Runs one trial and returns its peak Mahalanobis, or None on failure.
-    Must be a module-level function (not a closure/lambda) to be picklable
-    for multiprocessing."""
+    """One trial -> peak Mahalanobis, or None on failure.
+
+    Module-level so multiprocessing can pickle it.
+    """
     seed, duration_days, strike_days, tau, q, dv_mag = task
     mask = np.zeros(9, dtype=bool)
     mask[0] = True
@@ -91,23 +84,23 @@ def main():
     strike_days = args.strike_time_days or (args.duration_days / 2.0)
     n_workers = args.n_workers or mp.cpu_count()
 
-    # warn about candidates violating the duration >= 10*tau floor
+    # flag candidates that break the duration >= 10*tau floor
     duration_s = args.duration_days * 86400.0
     for tau in args.tau_values:
         if duration_s < 10.0 * tau:
-            print(f"NOTE: tau={tau:.2e} violates duration>=10*tau at "
+            print(f"NOTE: tau={tau:.2e} breaks duration>=10*tau at "
                   f"duration_days={args.duration_days} - included anyway, "
-                  f"but treat its result with suspicion.")
+                  f"but treat the result with suspicion.")
 
     n_candidates = len(args.tau_values) * len(args.q_values)
     print(f"2D search at duration={args.duration_days}d, ref_dv={args.ref_dv}, "
           f"{args.coarse_trials} trials/candidate ({n_candidates} candidates, "
           f"{n_workers} workers)")
 
-    # Flatten every (tau, q, trial, is_signal) combination into one task list
-    # so the whole search parallelizes across cores, not just within a candidate.
+    # Flatten every (tau, q, trial, is_signal) into one task list so the
+    # whole search parallelizes across cores, not just within a candidate.
     tasks = []
-    task_index = []  # (tau, q, is_signal) per task, same order as `tasks`
+    task_index = []  # (tau, q, is_signal) per task, same order as tasks
     for tau in args.tau_values:
         for q in args.q_values:
             for t in range(args.coarse_trials):

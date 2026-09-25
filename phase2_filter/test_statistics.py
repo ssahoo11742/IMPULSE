@@ -1,7 +1,7 @@
-"""Test statistics extracted from EKF + smoother output.
+"""Test statistics from EKF + smoother output.
 
-All functions operate on lists of 9-state vectors (and associated covariances)
-produced by the forward/backward/smoother pipeline.
+All of these take lists of 9-state vectors (and covariances) from the
+forward / backward / smoother pipeline.
 """
 
 from .linalg_utils import safe_eigh_inverse
@@ -14,24 +14,10 @@ def compute_smoothed_accel_peak(
     times: List[float],
     strike_window: Optional[Tuple[float, float]] = None,
 ) -> dict:
-    """Return peak magnitude of the smoothed RSW acceleration.
+    """Peak magnitude of the smoothed RSW acceleration.
 
-    Parameters
-    ----------
-    sm_states : list of np.ndarray, shape (9,)
-        Smoothed state vectors.
-    times : list of float
-        Epoch times [s], same length as sm_states.
-    strike_window : (t_start, t_end) or None
-        If provided, restrict the search to this window.
-
-    Returns
-    -------
-    dict with keys:
-        peak_norm   : max |w_S|  (Euclidean norm of [w_R, w_S, w_W])
-        peak_time   : epoch of the peak
-        peak_index  : index in the arrays
-        mean_offpeak: mean |w_S| outside the peak epoch (noise floor proxy)
+    If strike_window is given, only look inside that interval.
+    Returns peak_norm, peak_time, peak_index, mean_offpeak, and snr.
     """
     assert len(sm_states) == len(times)
     w_norms = np.array([np.linalg.norm(x[6:9]) for x in sm_states])
@@ -48,7 +34,7 @@ def compute_smoothed_accel_peak(
     peak_norm = float(w_norms[idx_peak])
     peak_time = times[idx_peak]
 
-    # noise floor: mean of everything except the peak epoch
+    # noise floor: everything except the peak sample
     offpeak = np.delete(w_norms, idx_peak)
     mean_offpeak = float(np.mean(offpeak)) if len(offpeak) > 0 else 0.0
 
@@ -71,15 +57,8 @@ def compute_mahalanobis_distance(
 ) -> np.ndarray:
     """Mahalanobis distance between forward and backward states.
 
-    Bennett Eq. 19–20:
-        X_M = X_F - X_B_bar
-        D_MH = sqrt( X_M^T * P_S^{-1} * X_M )
-
-    Parameters
-    ----------
-    state_mask : np.ndarray of bool, shape (9,)
-        If provided, restrict to a subspace (e.g. only a & M for along-track).
-        Default uses all 9 states.
+    dx = x_f - x_b, then D = sqrt(dx^T P_s^{-1} dx).
+    state_mask can restrict to a subspace (e.g. only a few components).
     """
     n = len(fwd_states)
     d = np.zeros(n)
@@ -93,9 +72,7 @@ def compute_mahalanobis_distance(
         P_s = sm_covs[i]
         P_sub = P_s[np.ix_(state_mask, state_mask)]
 
-        # Regularised inverse
         P_inv = safe_eigh_inverse(P_sub)
-
         d[i] = np.sqrt(max(0.0, dx_sub @ P_inv @ dx_sub))
 
     return d
@@ -107,15 +84,10 @@ def compute_mcreynolds(
     sm_states: List[np.ndarray],
     sm_covs: List[np.ndarray],
 ) -> dict:
-    """McReynold's filter–smoother consistency test.
+    """McReynolds filter-smoother consistency check.
 
-    Per-element (Eq. 26):
-        R_m,j = |X_F,j - X_S,j| / sqrt(P_F,jj - P_S,jj)
-
-    Scalar (Eq. 27, dimensionally cleaned up):
-        R_scalar = sqrt( sum_j R_m,j^2 )
-
-    Returns per-epoch arrays.
+    Per component: R_j = |x_f,j - x_s,j| / sqrt(P_f,jj - P_s,jj)
+    Scalar version is just the L2 norm of those.
     """
     n = len(fwd_states)
     n_states = fwd_states[0].shape[0]
