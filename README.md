@@ -11,3 +11,12 @@ This paper presents the completed calibration, validation, and fleet-scale appli
 The pipeline recovers synthetic impulses of Δv₅₀ = 0.041 m/s (synthetic clean data) and Δv₅₀ = 0.0385 m/s (real TLE data) with 99.9% confidence, while the aggregate false-positive rate is bounded at 19.46% per window from scrambled TLE noise and approximately 15% per window from in-window baseline triggers on real TLEs. We establish a pre-specified Bayesian decision framework for the ORDEM/MASTER comparison and demonstrate, via synthetic-universe injection, that the pipeline possesses the statistical power to discriminate the models under idealized conditions. However, the fleet-scale application reveals a fundamental limitation: the observed trigger rate of 51.55% dwarfs both the ORDEM-predicted debris signal (5.36%) and the MASTER-predicted signal (0.04%), with a net excess of 32.09% per window attributable to non-debris systematics. The end-to-end uncertainty propagation yields a total measurement uncertainty that is dominated by systematic confounders rather than Poisson counting statistics.
 
 The final result is scientifically meaningful: IMPULSE V1 demonstrates that passive orbital histories contain detectable structure, but that TLE-based dynamical anomaly detection under the baseline operating regime is fundamentally limited by an irreducible systematic floor. We quantify this floor, identify its sources, and chart a path toward V2 strategies that may break the degeneracy.
+
+
+
+### Initial Attempt
+
+The first iteration of this project that was naively implemented and initially seen as a success is below.
+
+https://github.com/ssahoo11742/DRIFTS
+
