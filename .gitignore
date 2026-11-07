@@ -1,7 +1,7 @@
 *.pkl
 *.npy
 */__pycache__/
-*.pdf
+figs/
 *.json
 *.png
 *.jpg
