@@ -213,8 +213,7 @@ python analysis/v1-x/cov-fig.py \
 ```bibtex
 @software{sahoo2026impulse_v1_1,
   author  = {Sahoo, Swayam},
-  title   = {{IMPULSE V1.1}: Inferred Microdebris Population from
-             Unmaneuvered LEO State Evolution},
+  title   = {{IMPULSE V1.1}: Quantifying the Real-Data Limits of Passive Orbital Sensing for Sub-Catalog Debris-Environment Model Discrimination},
   year    = {2026},
   doi     = {10.5281/zenodo.24025405},
   url     = {http://doi.org/10.5281/zenodo.24025405},
