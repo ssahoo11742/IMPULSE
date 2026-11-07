@@ -19,7 +19,7 @@ from .dynamics import (
     augmented_dynamics, compute_stm, compute_process_noise,
     _elements_from_x, e_argp_from_hk
 )
-
+names = ["a", "h", "k", "i", "Omega", "M", "w_R", "w_S", "w_W"]
 
 def _classical_to_hk_measurement(z: np.ndarray) -> np.ndarray:
     """Classical [a, e, i, Omega, argp, M] -> [a, h, k, i, Omega, M]."""
@@ -108,7 +108,11 @@ class EKF:
 
             self.P = Phi @ self.P @ Phi.T
             if not np.all(np.isfinite(self.P)) or np.any(np.diag(self.P) > 1e12):
-                raise RuntimeError("EKF covariance diverged during predict")
+                bad = np.where(~np.isfinite(self.P) | (np.diag(self.P) > 1e12))[0]
+                raise RuntimeError(
+                    f"EKF cov diverged: dir={self.direction} t={self.t:.0f}s "
+                    f"ch={[names[i] for i in bad]} "
+                    f"diag={[f'{self.P[i,i]:.2e}' for i in bad]}")
             if self.direction == "forward":
                 self.P += S
             else:
