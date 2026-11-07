@@ -56,7 +56,7 @@ def load_objects_with_altitude(tle_file: str, meta_file: str, durations_file: st
     return objects
 
 
-def build_interpolator(flux_csv: str, model: str = "ordem"):
+def build_interpolator(flux_csv: str, model: str = "ordem", ordem_col="ordem_flux_1mm_1cm", master_col="master_flux_1mm_1cm"):
     """Build 2D interpolator from flux_comparison.csv (model = 'ordem' or 'master')."""
     alts, incs, fluxes = [], [], []
 
@@ -66,9 +66,9 @@ def build_interpolator(flux_csv: str, model: str = "ordem"):
             alt = float(row["altitude_km"])
             inc = float(row["inclination_deg"])
             if model == "ordem":
-                flux = float(row["ordem_flux_1mm_1cm"])
+                flux = float(row[ordem_col])
             else:
-                flux_val = row.get("master_flux_1mm_1cm", "").strip()
+                flux_val = row.get(master_col, "").strip()
                 if not flux_val:
                     continue
                 flux = float(flux_val)
@@ -110,6 +110,8 @@ def main():
     parser.add_argument("--durations", default="TLE/real_tles.tle.durations.json")
     parser.add_argument("--output-ordem", default="results/ordem_flux_per_object.json")
     parser.add_argument("--output-master", default="results/master_flux_per_object.json")
+    parser.add_argument("--ordem-col", default="ordem_flux_1mm_1cm")
+    parser.add_argument("--master-col", default="master_flux_1mm_1cm")
     args = parser.parse_args()
 
     print("Loading fleet...")
@@ -117,11 +119,11 @@ def main():
     print(f"Loaded {len(objects)} objects")
 
     print("Building ORDEM interpolator...")
-    ordem_interp, alt_g, inc_g = build_interpolator(args.flux_csv, "ordem")
+    ordem_interp, alt_g, inc_g = build_interpolator(args.flux_csv, "ordem", args.ordem_col, args.master_col)
     print(f"  Grid: alts {alt_g.tolist()}, incs {inc_g.tolist()}")
 
     print("Building MASTER interpolator...")
-    master_interp, _, _ = build_interpolator(args.flux_csv, "master")
+    master_interp, _, _ = build_interpolator(args.flux_csv, "master", args.ordem_col, args.master_col)
 
     ordem_results = {}
     master_results = {}
