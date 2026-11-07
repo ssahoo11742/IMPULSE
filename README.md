@@ -19,8 +19,8 @@ The sub-catalog (≤ 10 cm) orbital debris environment is poorly constrained; NA
 | Item                           | Description                                                                 |
 | ------------------------------ | --------------------------------------------------------------------------- |
 | `IMPULSE_V1.1_FULL.pdf`        | Final V1.1 paper (Oct 2026)                                                 |
-| `IMPULSE_STS_Swayam_Sahoo.pdf` | V1 paper (Sept 2026), superseded by V1.1                                    |
-| Erratum PDF                    | Correction notice for V1 (measurement-covariance error)                     |
+| `IMPULSE_V1_FULL.pdf`          | V1 paper (Sept 2026), superseded by V1.1                                    |
+| `IMPULSE_V1_Erratum.pdf`       | Correction notice for V1 (measurement-covariance error)                     |
 | `phase2_filter/`               | Filter, smoother, validation, and analysis pipeline (this README covers it) |
 | `results/`                     | Frozen result JSONs backing every number, figure, and table in the papers   |
 | Supporting packages            | `TLE/`, `constants/`, `propagator/` (see Requirements)                      |
@@ -64,7 +64,7 @@ scrambled_tle_null.py           (permuted / scrambled null, residual mode)
 interpolate_flux_to_fleet.py ── eval_fleet_efficiency.py
                                 (model comparison: expected detectable events)
         │
-cov-fig.py        (Figure 5: per-object covariance ratios)
+analysis/v1-x/cov-fig.py     (Figure 5: per-object covariance ratios)
 ```
 
 Core machinery shared by all stages: `config.py` (tunables), `dynamics.py`, `ekf.py`, `smoother.py` (Fraser-Potter), `test_statistics.py` (Mahalanobis), `linalg_utils.py`, and `validation.py` (truth propagators; also an import target for the consistency test).
@@ -73,10 +73,12 @@ Core machinery shared by all stages: `config.py` (tunables), `dynamics.py`, `ekf
 
 Run from the repository root (`phase2_filter` importable as a package). Every stage writes a JSON under `results/`; all V1.1 numbers trace to those files.
 
+**One-shot driver:** `python pipeline.py` runs every stage below in dependency order with these exact configurations (see `pipeline.py --list-stages`, `--dry-run`, `--stages`, `--eta`). It skips stages whose outputs already exist, and its `report` stage prints a side-by-side comparison against the paper's numbers. If `TLE/real_tles.tle.meta.json` or the durations JSON is absent, its `prepare` stage derives stand-ins from the repo's own data.
+
 **0. Filter validation ladder** (null / bias / impulse / detect demos):
 
 ```bash
-python -m phase2_filter.run_validation --help
+python -m phase2_filter.run_validation --step all
 ```
 
 **1. Pooled synthetic null → design threshold** (18,582 trials, SGP4-consistent convention pipeline, jittered geometry, honest per-trial R):
@@ -94,29 +96,47 @@ python -m phase2_filter.convention_consistency_test \
 **2. Confounder nulls (Gate 2):**
 
 ```bash
-python -m phase2_filter.gate2_confounders <!-- TODO: exact flags used -->
+python -m phase2_filter.gate2_confounders \
+    --threshold 417.94 --n-trials 2000 \
+    --output results/gate2_confounders_v2.json
 ```
 
 **3. Real-TLE strike injection (Gate 3):**
 
 ```bash
-python -m phase2_filter.real_tle_strike_injection <!-- TODO: exact flags used -->
+python -m phase2_filter.real_tle_strike_injection \
+    --tle-history-dir TLE/histories \
+    --meta TLE/real_tles.tle.meta.json \
+    --durations TLE/real_tles.tle.durations_2009_2026.json \
+    --threshold 417.94 --r-from-fit 1 \
+    --output results/real_tle_efficiency.json
 ```
 
 → Δv50 = 1.21 m/s; 0/149 at negligible Δv (zero false triggers on real TLE streams).
 
-**4. Synthetic impulse sweep / efficiency curve (Gate 4):**
+**4. Synthetic impulse sweep / efficiency curve (Gate 4)** (honest R in impulse mode too, FIX #16):
 
 ```bash
-python -m phase2_filter.find_dv_threshold <!-- TODO: exact flags used -->
+python -m phase2_filter.find_dv_threshold \
+    --mode impulse --truth-mode sgp4_consistent \
+    --threshold 417.94 --n-trials 200 \
+    --dv-grid 0.05,0.1,0.2,0.4,0.7,1.0,1.2,1.5,2.0,3.0,5.0,10.0,20.0 \
+    --fit-bstar 1 --r-from-fit 1 --jitter-geometry 1 \
+    --seed-offset 560000 \
+    --output results/gate4_efficiency_sweep.json
 ```
 
-→ Δv50 = 1.19 m/s; ε(Δv) efficiency curve feeding the model-prediction stage.
+→ Δv50 = 1.19 m/s; ε(Δv) efficiency curve feeding the model-prediction stage. (`--n-trials` is per grid point.)
 
 **5. Fleet application** (per-object honest R, production 7-day edge trim):
 
 ```bash
-python -m phase2_filter.run_real_fleet --r-from-fit 1 <!-- TODO: exact flags used -->
+python -m phase2_filter.run_real_fleet \
+    --tle-history-dir TLE/histories \
+    --meta TLE/real_tles.tle.meta.json \
+    --durations TLE/real_tles.tle.durations_2009_2026.json \
+    --threshold 417.94 --r-from-fit 1 --n-workers 4 \
+    --output results/real_detections_honestR.json
 ```
 
 → 6 candidates in 15,760 valid windows (0.038%), vs 15.76 expected at the design rate.
@@ -124,20 +144,46 @@ python -m phase2_filter.run_real_fleet --r-from-fit 1 <!-- TODO: exact flags use
 **6. Permuted null** (residual-mode reference):
 
 ```bash
-python -m phase2_filter.scrambled_tle_null --scramble-mode residual <!-- TODO: exact flags used -->
+python -m phase2_filter.scrambled_tle_null \
+    --tle-history-dir TLE/histories \
+    --meta TLE/real_tles.tle.meta.json \
+    --durations TLE/real_tles.tle.durations_2009_2026.json \
+    --threshold 417.94 --r-from-fit 1 --scramble-mode residual \
+    --output results/scrambled_null_residual.json
 ```
 
-**7. Model comparison** (flux → fleet, then expected detectable events with window-based exposure):
+**7. Model comparison** (flux → fleet, then expected detectable events with window-based exposure; 76 searched days per window is the paper convention):
 
 ```bash
-python -m phase2_filter.interpolate_flux_to_fleet <!-- TODO: exact flags used -->
-python -m phase2_filter.eval_fleet_efficiency <!-- TODO: exact flags used -->
+python flux_analysis/flux_compare.py \
+    --ordem-dir flux_analysis/results-ORDEM \
+    --ordem-manifest flux_analysis/manifest.txt \
+    --master-dir flux_analysis/results-MASTER \
+    --output flux_analysis/flux_comparison.csv
+
+python -m phase2_filter.interpolate_flux_to_fleet \
+    --flux-csv flux_analysis/flux_comparison.csv \
+    --tle-file TLE/real_tles.tle \
+    --meta TLE/real_tles.tle.meta.json \
+    --durations TLE/real_tles.tle.durations_2009_2026.json \
+    --output-ordem results/ordem_flux_per_object.json \
+    --output-master results/master_flux_per_object.json
+
+python -m phase2_filter.eval_fleet_efficiency \
+    --efficiency results/gate4_efficiency_sweep.json \
+    --ordem-flux results/ordem_flux_per_object.json \
+    --master-flux results/master_flux_per_object.json \
+    --windows-file results/real_detections_honestR.json \
+    --window-days 76 \
+    --output results/fleet_expected_detected.json
 ```
 
-**8. Figure 5** (per-object covariance ratios; script `make_cov_ratio_figure.py`, included):
+**8. Figure 5** (per-object covariance ratios; script `analysis/v1-x/cov-fig.py`, needs matplotlib):
 
 ```bash
-python make_cov_ratio_figure.py <!-- TODO: exact flags used -->
+python analysis/v1-x/cov-fig.py \
+    --fleet-file results/real_detections_honestR.json \
+    --out fig5_covariance_ratios.png
 ```
 
 ## Key Results at a Glance
@@ -167,8 +213,7 @@ python make_cov_ratio_figure.py <!-- TODO: exact flags used -->
 ```bibtex
 @software{sahoo2026impulse_v1_1,
   author  = {Sahoo, Swayam},
-  title   = {{IMPULSE V1.1}: Inferred Microdebris Population from
-             Unmaneuvered LEO State Evolution},
+  title   = {{IMPULSE V1.1}: Quantifying the Real-Data Limits of Passive Orbital Sensing for Sub-Catalog Debris-Environment Model Discrimination},
   year    = {2026},
   doi     = {10.5281/zenodo.24025405},
   url     = {http://doi.org/10.5281/zenodo.24025405},
