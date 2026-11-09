@@ -177,7 +177,7 @@ from phase2_filter.test_statistics import compute_mahalanobis_distance
 from phase2_filter.dynamics import hk_from_e_argp
 from phase2_filter.validation import _propagate_truth, _default_el0
 from propagator.orbital import MeanElements, mean_to_true_anomaly, brouwer_rates
-
+from phase2_filter.persistence import detect_transient_excursions
 SANITY_CEILING = 1.0e4
 R_EMP_MEDIAN_OF_CHI2_1 = 0.4549364   # median of a chi^2_1 squared deviation
 R_EMP_CAP_FACTOR = 100.0             # cap honest R at 100x production R_DIAG
@@ -468,6 +468,7 @@ def generate_tle_like_observations(truth_hist: Dict,
                                    fit_bstar: bool,
                                    max_nfev: int = 2000,
                                    fit_rms_max_m: Optional[float] = 5000.0,
+                                   persistence_filter: bool = False,
                                    ) -> Tuple[List, Dict]:
     """Stage C+D: TLE-like observation stream + element-level diagnostics.
 
@@ -563,10 +564,22 @@ def generate_tle_like_observations(truth_hist: Dict,
         z = np.array([fitted["a"], fitted["ecc"], fitted["inc"],
                       fitted["raan"], fitted["argp"], fitted["M"]])
         obs.append((t_ep, z, fitted["fit_rms_m"]))
+        
+    n_transient_dropped = 0
+    if persistence_filter and len(obs) >= 6 and len(da_list) == len(obs):
+        det = detect_transient_excursions(
+            np.asarray(da_list, float), t=np.asarray(dt_list, float))
+        if det["n_dropped"] > 0:
+            keep = ~det["drop_mask"]
+            obs = [o for o, k in zip(obs, keep) if k]
+            da_list = [d for d, k in zip(da_list, keep) if k]
+            dt_list = [d for d, k in zip(dt_list, keep) if k]
+            n_transient_dropped = int(det["n_dropped"])    
 
     diag = {"n_fit_attempts": n_fit_attempts,
             "n_fit_failures": n_fit_failures,
-            "n_rejected_fits": n_rejected_fits}
+            "n_rejected_fits": n_rejected_fits,
+            "n_transient_dropped": n_transient_dropped}
     if obs:
         diag["max_fit_rms_m"] = float(max(o[2] for o in obs))
     if len(da_list) >= 3:
@@ -718,7 +731,8 @@ def _run_one(args_tuple) -> Optional[Dict]:
      fit_span_days, noise_mode, mode, dv_mag,
      truth_mode, fit_bstar, truth_dt_hours,
      max_nfev, edge_trim_days, r_scale, p0_bwd_inflate,
-     r_from_fit, jitter_geometry, fit_rms_max_m) = args_tuple
+     r_from_fit, jitter_geometry, fit_rms_max_m,
+     persistence_filter) = args_tuple
 
     rng = np.random.default_rng(seed)
     epoch_jd = 2460000.5
@@ -784,7 +798,7 @@ def _run_one(args_tuple) -> Optional[Dict]:
         obs, diag = generate_tle_like_observations(
             truth, epoch_jd, tle_cadence_days, fit_span_days,
             truth_mode, fit_bstar, max_nfev=max_nfev,
-            fit_rms_max_m=fit_rms_max_m)
+            fit_rms_max_m=fit_rms_max_m, persistence_filter=bool(persistence_filter))
     except Exception as e:
         return {"seed": seed, "ok": False, "error": f"tle-fit: {e}"}
     if len(obs) < 10:
@@ -899,6 +913,14 @@ def _run_one(args_tuple) -> Optional[Dict]:
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--persistence-filter", type=int, default=1,
+                help="V2 FIX B: 1 (default) drop transient fitted-a "
+                    "excursions (reverting km-scale fit-branch "
+                    "flips, the V1.1 band-top artifact) from the "
+                    "TLE-like stream after the position-QC gate. "
+                    "Persistent level shifts (real strikes) and "
+                    "window-end excursions are never dropped. "
+                    "0 restores the V1.1 stream for A/B checks.")
     p.add_argument("--mode", choices=["null", "impulse"], default="null")
     p.add_argument("--n-trials", type=int, default=100)
     p.add_argument("--window-days", type=float, default=90.0)
@@ -988,7 +1010,8 @@ def main():
     common_tail = (args.truth_mode, args.fit_bstar, args.truth_dt_hours,
                    args.max_nfev, args.edge_trim_days, args.r_scale,
                    args.p0_bwd_inflate, args.r_from_fit,
-                   args.jitter_geometry, args.fit_rms_max_m)
+                   args.jitter_geometry, args.fit_rms_max_m,
+                   args.persistence_filter)
 
     tasks = []
     if args.mode == "null":
