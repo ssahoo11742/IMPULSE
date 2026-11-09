@@ -10,7 +10,7 @@ import numpy as np
 # -----------------------------------------------------------------------------
 # Time constant (seconds).  Bennett ~1 s for GPS cadence.
 # For daily TLE cadence (dt = 86400 s) start near 1e5 s (~1 day).
-DEFAULT_TAU_S: float = 1.0e6
+DEFAULT_TAU_S: float = 3e4
 
 # Process-noise spectral density per RSW channel.
 # Units: [acceleration]^2 * [time] = (m/s^2)^2 * s = m^2 / s^3.
@@ -29,7 +29,7 @@ DEFAULT_TAU_S: float = 1.0e6
 # tau=1e5 s / daily cadence (see run_bias_test); 5e-17 to 1e-16 passed at
 # 30 days. Longer baselines (e.g. 365 days) still need q even smaller /
 # tau retuned - this has NOT been re-derived for arbitrary durations yet.
-DEFAULT_Q: float = 5.0e-17
+DEFAULT_Q: float = 1e-19
 
 # -----------------------------------------------------------------------------
 # Measurement noise diagonal for synthetic / TLE mean elements
