@@ -460,6 +460,67 @@ def _secular_advanced_guess(truth_hist: Dict,
     ])
 
 
+# ---------------------------------------------------------------------------
+# FIX A (V2.1): warm-start sequential source fits + element-space prior QC.
+# ---------------------------------------------------------------------------
+# Opt-in via environment variables (NOT module attributes, so mp.Pool spawn
+# workers on Windows inherit the setting):
+#   IMPULSE_FIXA=1             warm start ON + element QC ON
+#   IMPULSE_FIXA_QC_SIGMA=S    QC threshold in sigma per channel (default 10)
+#   unset / IMPULSE_FIXA=0     both OFF -> byte-compatible V2 Fix B behavior
+# Explicit kwargs override the environment (for programmatic callers).
+
+
+def _fixa_flags(warm_start: Optional[bool],
+                qc_sigma: Optional[float]) -> Tuple[bool, float]:
+    """Resolve Fix A on/off + QC sigma. Env vars win unless kwargs given."""
+    if warm_start is None:
+        warm_start = str(os.environ.get("IMPULSE_FIXA", "0")).strip().lower() \
+            not in ("", "0", "false", "no", "off")
+    if qc_sigma is None:
+        raw = str(os.environ.get("IMPULSE_FIXA_QC_SIGMA", "10.0")).strip()
+        try:
+            qc_sigma = float(raw)
+        except ValueError:
+            qc_sigma = 10.0
+    return bool(warm_start), float(qc_sigma)
+
+
+def _secular_advanced_fit_guess(z_prev: np.ndarray,
+                                bstar_prev: float,
+                                dt: float) -> np.ndarray:
+    """FIX A: advance the previous ACCEPTED fitted element set by the
+    IMPULSE secular (Brouwer) rates over the gap - the exact prediction
+    empirical_R_from_obs makes, so the warm start sits on the one-step
+    innovation the filter will face. Returns a 7-vector guess
+    [a, e, i, raan, argp, M, bstar]."""
+    br = brouwer_rates(z_prev[0], max(1e-9, z_prev[1]), z_prev[2])
+    return np.array([
+        z_prev[0],
+        z_prev[1],
+        z_prev[2],
+        _wrap_pi(z_prev[3] + br["d_raan"] * dt),
+        _wrap_pi(z_prev[4] + br["d_argp"] * dt),
+        _wrap_pi(z_prev[5] + (br["n"] + br["dn_j2"]) * dt),
+        bstar_prev,
+    ])
+
+
+def _element_dev(z: np.ndarray, pred: np.ndarray) -> np.ndarray:
+    """One-step element deviation of a candidate state against a secular
+    prediction - identical to the residual vector in empirical_R_from_obs
+    (angles wrapped), so QC measures the exact quantity the honest R and
+    the filter see."""
+    return np.array([
+        z[0] - pred[0],
+        z[1] - pred[1],
+        z[2] - pred[2],
+        _wrap_pi(z[3] - pred[3]),
+        _wrap_pi(z[4] - pred[4]),
+        _wrap_pi(z[5] - pred[5]),
+    ])
+
+
 def generate_tle_like_observations(truth_hist: Dict,
                                    epoch_jd: float,
                                    tle_cadence_days: float,
@@ -469,19 +530,51 @@ def generate_tle_like_observations(truth_hist: Dict,
                                    max_nfev: int = 2000,
                                    fit_rms_max_m: Optional[float] = 5000.0,
                                    persistence_filter: bool = False,
+                                   warm_start: Optional[bool] = None,
+                                   element_qc_sigma: Optional[float] = None,
                                    ) -> Tuple[List, Dict]:
     """Stage C+D: TLE-like observation stream + element-level diagnostics.
 
-    FIX #15: fits whose position RMS exceeds fit_rms_max_m are REJECTED
-    from the stream (production QC). Without the gate, fits that flip
-    between local minima at some geometries inject isolated km-scale
-    element jumps; the median-based honest R ignores them (robust by
-    design), so a 10 m-confident filter faces 100-sigma innovations.
+    FIX #15: production-QC gate on position RMS (unchanged).
+    Fix B: persistence filter on the da stream (unchanged).
+
+    FIX A (V2.1, opt-in - see _fixa_flags):
+      (1) WARM-START SEQUENTIAL FITS. Operational TLE production fits each
+          new element set starting from the running solution, never from an
+          independent first guess. Cold-starting every epoch lets
+          consecutive fits fall into different SGP4 local-minimum basins at
+          some geometries (notably the small-e (e, argp, M) flat valley,
+          where positions barely constrain the element combination): the
+          stream then contains element jumps no real catalog would publish,
+          while the median-based honest R does not widen for them, so the
+          filter faces large unsignaled innovations. That is the persistent-
+          excursion / leftover class in the 146-410 band of the V2 null
+          tail. Each epoch now starts from the previous ACCEPTED fit
+          (secular-advanced over the gap); a warm fit that fails or is
+          RMS-gated is retried once from the cold truth-advanced guess.
+      (2) ELEMENT-SPACE PRIOR QC. A candidate whose one-step element
+          deviation from the previous accepted fit exceeds element_qc_sigma
+          (per channel, against the stream's own running median-of-squares
+          scatter floored at production R_DIAG) is SUSPECT: it is refit from
+          the cold guess and the two candidates are compared.
+            - cold agrees with warm  -> the data itself demands the new
+              state (a real event in impulse mode): ACCEPT it;
+            - candidates disagree    -> the data is degenerate (flat
+              valley): ACCEPT the branch closer to the previous prediction
+              (continuity, exactly what warm-started production would
+              publish).
+          QC never drops an epoch by itself, so impulse-mode strikes cannot
+          be erased and stream cadence is unchanged; the tail is removed by
+          enforcing continuity, not by censoring.
 
     Returns (observations, diagnostics). Diagnostics compare each fitted
     element set against the truth elements at the same epoch, so the SOURCE
     of a mismatch (secular drift vs periodic vs noise) is visible.
     """
+    fixa_warm, fixa_sigma = _fixa_flags(warm_start, element_qc_sigma)
+    fixa_on = bool(fixa_warm)          # QC rides along with warm start
+    R_diag_floor = np.asarray(R_DIAG_ELEMENTS, dtype=float)
+
     t_arr = np.array(truth_hist["t"])
     cad_s = tle_cadence_days * 86400.0
     half_fit = fit_span_days * 86400.0 / 2.0
@@ -516,6 +609,18 @@ def generate_tle_like_observations(truth_hist: Dict,
     n_fit_attempts = 0
     n_fit_failures = 0
     n_rejected_fits = 0
+    # FIX A bookkeeping
+    n_warm_fits = 0
+    n_warm_recovered = 0
+    n_suspect_epochs = 0
+    n_suspect_confirmed = 0
+    n_suspect_continuity = 0
+    qc_dev_history = []      # accepted one-step deviations (per channel)
+    qc_max_norm_dev = 0.0
+    prev_t = None            # last accepted epoch time (s)
+    prev_z = None            # last accepted element 6-vector
+    prev_bstar = 0.0
+
     for k in range(n_tles + 1):
         t_ep = k * cad_s
         mask = (t_arr >= t_ep - half_fit) & (t_arr <= t_ep + half_fit)
@@ -542,13 +647,38 @@ def generate_tle_like_observations(truth_hist: Dict,
             )
 
         i_near = int(np.argmin(np.abs(t_arr - t_ep)))
-        # FIX #1: secular-advanced initial guess (was frozen epoch-0 values).
-        guess = _secular_advanced_guess(truth_hist, t_ep, i_near, truth_mode)
+        # FIX #1: secular-advanced initial guess (cold start).
+        guess_cold = _secular_advanced_guess(truth_hist, t_ep, i_near,
+                                             truth_mode)
 
         tle_epoch_jd = epoch_jd + t_ep / 86400.0
         n_fit_attempts += 1
-        fitted = fit_tle_epoch(tle_epoch_jd, t_ep, fit_t, fit_pos,
-                               guess, fit_bstar, max_nfev=max_nfev)
+
+        # ------------------- FIX A: warm-start fit ----------------------
+        use_warm = fixa_on and prev_z is not None
+        cand_from_warm = False
+        fitted = None
+        if use_warm:
+            guess_warm = _secular_advanced_fit_guess(prev_z, prev_bstar,
+                                                     t_ep - prev_t)
+            n_warm_fits += 1
+            fitted = fit_tle_epoch(tle_epoch_jd, t_ep, fit_t, fit_pos,
+                                   guess_warm, fit_bstar,
+                                   max_nfev=max_nfev)
+            cand_from_warm = (fitted is not None and
+                              (fit_rms_max_m is None or
+                               fitted["fit_rms_m"] <= fit_rms_max_m))
+            if not cand_from_warm:
+                fitted = None
+        if fitted is None:
+            fitted = fit_tle_epoch(tle_epoch_jd, t_ep, fit_t, fit_pos,
+                                   guess_cold, fit_bstar,
+                                   max_nfev=max_nfev)
+            if use_warm and fitted is not None and (
+                    fit_rms_max_m is None or
+                    fitted["fit_rms_m"] <= fit_rms_max_m):
+                n_warm_recovered += 1
+
         if fitted is None:
             n_fit_failures += 1
             continue
@@ -557,6 +687,69 @@ def generate_tle_like_observations(truth_hist: Dict,
             n_rejected_fits += 1
             continue
 
+        # --------------- FIX A: element-space prior QC ------------------
+        if fixa_on and prev_z is not None:
+            pred = _secular_advanced_fit_guess(prev_z, prev_bstar,
+                                               t_ep - prev_t)[:6]
+            z_cand = np.array([fitted["a"], fitted["ecc"], fitted["inc"],
+                               fitted["raan"], fitted["argp"],
+                               fitted["M"]])
+            dev = _element_dev(z_cand, pred)
+            if qc_dev_history:
+                scale = np.median(np.asarray(qc_dev_history) ** 2,
+                                  axis=0) / R_EMP_MEDIAN_OF_CHI2_1
+            else:
+                scale = np.zeros(6)
+            scale = np.maximum(scale, R_diag_floor)
+            norm = np.abs(dev) / np.sqrt(scale)
+            if float(np.max(norm)) > fixa_sigma:
+                n_suspect_epochs += 1
+                if not cand_from_warm:
+                    # The cold start was the only admissible one: the data
+                    # put the fit there. Trust it (strike-safe).
+                    n_suspect_confirmed += 1
+                else:
+                    fitted_cold = fit_tle_epoch(tle_epoch_jd, t_ep, fit_t,
+                                                fit_pos, guess_cold,
+                                                fit_bstar,
+                                                max_nfev=max_nfev)
+                    if fitted_cold is None or (
+                            fit_rms_max_m is not None and
+                            fitted_cold["fit_rms_m"] > fit_rms_max_m):
+                        # No admissible alternative: trust the warm branch
+                        # (data-driven; protects real strikes).
+                        n_suspect_confirmed += 1
+                    else:
+                        z_c = np.array([fitted_cold["a"],
+                                        fitted_cold["ecc"],
+                                        fitted_cold["inc"],
+                                        fitted_cold["raan"],
+                                        fitted_cold["argp"],
+                                        fitted_cold["M"]])
+                        dev_c = _element_dev(z_c, pred)
+                        norm_c = np.abs(dev_c) / np.sqrt(scale)
+                        agree = float(np.max(np.abs(
+                            _element_dev(z_c, z_cand)) / np.sqrt(scale)))
+                        if agree <= fixa_sigma:
+                            # Both starts land on the same state: the data
+                            # demands it (real event in impulse mode).
+                            n_suspect_confirmed += 1
+                        else:
+                            # Degenerate data (flat valley): keep the
+                            # branch closer to the running prediction,
+                            # i.e. what warm-started production publishes.
+                            if float(np.max(norm_c)) < float(np.max(norm)):
+                                fitted = fitted_cold
+                            n_suspect_continuity += 1
+                # bookkeeping on the accepted candidate
+                z_cand = np.array([fitted["a"], fitted["ecc"],
+                                   fitted["inc"], fitted["raan"],
+                                   fitted["argp"], fitted["M"]])
+                dev = _element_dev(z_cand, pred)
+                norm = np.abs(dev) / np.sqrt(scale)
+            qc_dev_history.append(dev)
+            qc_max_norm_dev = max(qc_max_norm_dev, float(np.max(norm)))
+
         # element-level diagnostics: fitted a vs truth a at this epoch
         da_list.append(fitted["a"] - truth_hist["a"][i_near])
         dt_list.append(t_ep / 86400.0)
@@ -564,7 +757,9 @@ def generate_tle_like_observations(truth_hist: Dict,
         z = np.array([fitted["a"], fitted["ecc"], fitted["inc"],
                       fitted["raan"], fitted["argp"], fitted["M"]])
         obs.append((t_ep, z, fitted["fit_rms_m"]))
-        
+        prev_t, prev_z = t_ep, z
+        prev_bstar = float(fitted.get("bstar", 0.0))
+
     n_transient_dropped = 0
     if persistence_filter and len(obs) >= 6 and len(da_list) == len(obs):
         det = detect_transient_excursions(
@@ -574,12 +769,20 @@ def generate_tle_like_observations(truth_hist: Dict,
             obs = [o for o, k in zip(obs, keep) if k]
             da_list = [d for d, k in zip(da_list, keep) if k]
             dt_list = [d for d, k in zip(dt_list, keep) if k]
-            n_transient_dropped = int(det["n_dropped"])    
+            n_transient_dropped = int(det["n_dropped"])
 
     diag = {"n_fit_attempts": n_fit_attempts,
             "n_fit_failures": n_fit_failures,
             "n_rejected_fits": n_rejected_fits,
-            "n_transient_dropped": n_transient_dropped}
+            "n_transient_dropped": n_transient_dropped,
+            "fixa_warm": fixa_on,
+            "fixa_qc_sigma": float(fixa_sigma),
+            "n_warm_fits": n_warm_fits,
+            "n_warm_recovered": n_warm_recovered,
+            "n_suspect_epochs": n_suspect_epochs,
+            "n_suspect_confirmed": n_suspect_confirmed,
+            "n_suspect_continuity": n_suspect_continuity,
+            "fixa_max_norm_dev": float(qc_max_norm_dev)}
     if obs:
         diag["max_fit_rms_m"] = float(max(o[2] for o in obs))
     if len(da_list) >= 3:
@@ -591,7 +794,6 @@ def generate_tle_like_observations(truth_hist: Dict,
                      "max_abs_da_m": float(np.max(np.abs(da))),
                      "da_slope_m_per_day": slope})
     return obs, diag
-
 
 # ---------------------------------------------------------------------------
 # Stage E/F: standard IMPULSE window filter on TLE-like observations
